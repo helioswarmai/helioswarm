@@ -6,6 +6,7 @@
 import type { Signal } from "../board";
 import { DEFAULT_RISK, HolderBook, overhang, type RiskConfig } from "./holders";
 import type { ParsedTx, TokenFlow } from "./parse";
+import type { PendingIntent } from "./pending";
 
 export interface SignalConfig {
   /** A single sell of at least this % of supply is a whale_sell. */
@@ -41,9 +42,52 @@ const pct = (x: number) => `${(x * 100).toFixed(2)}%`;
 export class SignalEngine {
   readonly books = new Map<string, HolderBook>();
   private lastFired = new Map<string, number>();
+  /** Signatures we saw before execution, with when we saw them. */
+  private pendingSeen = new Map<string, number>();
 
   constructor(mints: string[], private post: (s: Signal) => void, private cfg: SignalConfig = DEFAULT_SIGNALS, private ourWallets: ReadonlySet<string> = new Set()) {
     for (const m of mints) this.books.set(m, new HolderBook(m));
+  }
+
+  /**
+   * Feeds intents decoded from a deshred (not yet executed) transaction.
+   * Fires pending_sell / pending_move (high) and pending_activity (low).
+   */
+  ingestPending(intents: PendingIntent[]) {
+    for (const i of intents) {
+      const book = this.books.get(i.mint);
+      if (!book || this.ourWallets.has(i.owner)) continue;
+      if (!this.pendingSeen.has(i.signature)) this.pendingSeen.set(i.signature, i.ts);
+      if (this.pendingSeen.size > 5_000) this.pendingSeen.delete(this.pendingSeen.keys().next().value!);
+      const held = book.holders.get(i.owner)?.raw ?? 0n;
+      const heldShare = book.share(held);
+      const amtShare = i.amountRaw != null ? book.share(i.amountRaw) : 0;
+      const who = `${i.owner.slice(0, 6)}…`;
+      const tokens = i.amountRaw != null ? `${pct(amtShare)} of supply` : "an unknown amount";
+      const common = { wallet: i.owner, signature: i.signature, ts: i.ts };
+      if (i.kind === "sell" && Math.max(amtShare, heldShare) * 100 >= this.cfg.whaleSellPct) {
+        this.emit(book, { kind: "pending_sell", severity: amtShare * 100 >= this.cfg.whaleSellPct ? "high" : "low", score: Math.min(1, Math.max(amtShare, heldShare) * 10), reasons: [`${who} (holds ${pct(heldShare)}) is selling ${tokens} on ${i.venue}, not yet executed`], ...common }, `p:${i.signature}`, 0);
+      } else if (i.kind === "move" && heldShare * 100 >= this.cfg.holderMovedPct) {
+        this.emit(book, { kind: "pending_move", severity: "high", score: Math.min(1, heldShare * 10), reasons: [`${who} (holds ${pct(heldShare)}) is moving ${tokens}${i.to ? ` to ${i.to.slice(0, 6)}…` : ""}, not yet executed`], ...common }, `p:${i.signature}`, 0);
+      } else if (i.kind === "activity" && heldShare * 100 >= this.cfg.holderMovedPct) {
+        this.emit(book, { kind: "pending_activity", severity: "low", score: Math.min(1, heldShare * 5), reasons: [`${who} (holds ${pct(heldShare)}) sent a transaction touching its bag (direction unknown), not yet executed`], ...common }, `p:${i.signature}`, 0);
+      }
+    }
+  }
+
+  /** How many ms before execution we saw this signature, if we saw it pending. */
+  seenEarly(signature: string, executedAt: number): number | undefined {
+    const t = this.pendingSeen.get(signature);
+    if (t == null) return undefined;
+    this.pendingSeen.delete(signature);
+    return executedAt - t;
+  }
+
+  /** Wallets of the largest holders of each mint (to widen the deshred filter). */
+  topHolderWallets(n: number): Set<string> {
+    const out = new Set<string>();
+    for (const b of this.books.values()) for (const h of b.top(n)) out.add(h.owner);
+    return out;
   }
 
   /** Feeds one parsed transaction through the books and fires any signals. */

@@ -12,3 +12,4 @@ export * from "./stream/parse";
 export * from "./stream/holders";
 export * from "./stream/signals";
 export * from "./stream/types";
+export * from "./stream/pending";

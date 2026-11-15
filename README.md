@@ -100,7 +100,9 @@ With a `stream` section, the swarm subscribes to Solana Vibe Station's Yellowsto
   "tokenEnv": "SVS_X_TOKEN",
   "accounts": [],
   "commitment": "processed",
-  "snapshot": true
+  "snapshot": true,
+  "deshred": true,
+  "deshredHolders": 50
 }
 ```
 
@@ -118,6 +120,9 @@ Signals posted to the board:
 | `holder_moved` | A holder with at least `holderMovedPct`% of supply moves tokens to another wallet (a common step before a dump) | high: swarm exits now |
 | `sell_pressure` | Likely-seller overhang reaches `overhangPct`% of supply. Overhang is the sum over the top 50 holders of share × sell risk. | low, or high at twice the threshold |
 | `buy_pressure` | At least `buyPressureBuyers` distinct wallets put in `buyPressureSol` SOL net within `windowSec` | low |
+| `pending_sell` | Deshred: a holder's sell is in a block but not yet executed. It must be at least `whaleSellPct`% of supply, or come from a holder that big. | high if the sell itself is that big, low otherwise |
+| `pending_move` | Deshred: a holder with at least `holderMovedPct`% is moving tokens to another wallet, not yet executed | high: swarm exits now |
+| `pending_activity` | Deshred: a holder that size sent a transaction through some other program that touches its bag (direction unknown) | low: blocks buys |
 
 A holder's sell risk is a 0 to 1 heuristic. It rises when the holder:
 
@@ -135,7 +140,19 @@ SVS_X_TOKEN=... SOLANA_RPC_URL=... pnpm start -- --config swarm.json --watch   #
 
 `--watch` prints every parsed flow and signal as JSON lines. Use it to check your token and tune thresholds before letting agents act on them. During a normal run, set `SWARM_LOG_FLOWS=1` to log flows too.
 
-**What it can't do:** a sell is only visible once it has landed. Solana has no public mempool, so the swarm can't jump ahead of a sell it sees. The edge comes from the warning signs (profit, wallet moves, partial sells) and from reacting within about a second of the slot.
+### Seeing sells before they execute (deshred)
+
+With `deshred` on (the default), a second gRPC connection subscribes to `SubscribeDeshred`. SVS offers it on every gRPC plan. It delivers transactions as soon as their shreds are reassembled, before the validator runs them. Triton measures about 6 ms at p50 from shred arrival. Normal streams deliver only after execution.
+
+- **No balances yet:** a pending transaction has no balance changes, so the swarm decodes the instructions themselves. Pump.fun, PumpSwap, Raydium AMM v4 and Raydium CPMM swaps are decoded with direction and amount. Plain SPL transfers and TransferChecked are decoded too, including the new wallet's token account when it is created in the same transaction. Any other program that touches a holder's known token account is reported as `pending_activity`.
+- **Filter:** covers the target mints plus the top `deshredHolders` holders' wallets and token accounts per token, refreshed every minute. That catches transfers and v4 swaps that never name the mint.
+- **How early:** when the executed version of a transaction arrives, `--watch` prints `seenEarlyMs` on its flow, so you can see how early deshred saw it.
+
+**What it means:** when a whale's sell shows up in deshred, it is already placed in a block, so the swarm's sell lands after it, never before. The gain is reacting in the same or next slot, ahead of everyone waiting on executed or confirmed data. Bots on the same shred feed are just as fast. A pending transaction can also still fail or land on a fork, so a false alarm costs one exit.
+
+**Still not covered:** transactions waiting to get into a block. Solana has none to watch publicly. Before deshred, the earliest warnings are the holder signals above: profit, wallet moves and partial sells.
+
+**Decoder layouts are untested against live traffic.** Run `--watch` on a live token and compare the `pending` lines with the executed `flow` lines before you trust the exits.
 
 ## Wallets: one per agent
 

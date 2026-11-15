@@ -9,7 +9,7 @@
 import type { Ledger } from "./ledger";
 import type { AgentSpec } from "./roster";
 
-export type SignalKind = "whale_sell" | "holder_moved" | "sell_pressure" | "buy_pressure" | "note";
+export type SignalKind = "whale_sell" | "holder_moved" | "sell_pressure" | "buy_pressure" | "pending_sell" | "pending_move" | "pending_activity" | "note";
 
 export interface Signal {
   mint: string;
@@ -21,6 +21,8 @@ export interface Signal {
   reasons: string[];
   /** Wallet the signal is about, when there is one. */
   wallet?: string;
+  /** Transaction behind the signal, when there is one. */
+  signature?: string;
   /** "stream" or the agent id that posted it. */
   from: string;
   ts: number;
@@ -44,8 +46,8 @@ export interface CoordinationConfig {
 
 export const DEFAULT_COORDINATION: CoordinationConfig = {
   noSelfTradeMs: 30_000,
-  exitOn: ["whale_sell", "holder_moved"],
-  avoidOn: ["whale_sell", "holder_moved", "sell_pressure"],
+  exitOn: ["pending_sell", "pending_move", "whale_sell", "holder_moved"],
+  avoidOn: ["pending_sell", "pending_move", "pending_activity", "whale_sell", "holder_moved", "sell_pressure"],
   followBuyPressure: false,
 };
 

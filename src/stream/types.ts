@@ -9,6 +9,10 @@ export interface StreamConfig {
   commitment: "processed" | "confirmed";
   /** Load supply and the largest holders over RPC at startup (needs SOLANA_RPC_URL). */
   snapshot: boolean;
+  /** Also stream deshred (pre-execution) transactions. Uses a second gRPC connection. */
+  deshred: boolean;
+  /** How many top holders per token to watch directly in the deshred filter. */
+  deshredHolders: number;
 }
 
-export const DEFAULT_STREAM: Omit<StreamConfig, "endpoint"> = { kind: "svs", tokenEnv: "SVS_X_TOKEN", accounts: [], commitment: "processed", snapshot: true };
+export const DEFAULT_STREAM: Omit<StreamConfig, "endpoint"> = { kind: "svs", tokenEnv: "SVS_X_TOKEN", accounts: [], commitment: "processed", snapshot: true, deshred: true, deshredHolders: 50 };

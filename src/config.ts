@@ -154,7 +154,7 @@ function parseGroup(g: any, label: string): GroupConfig {
   };
 }
 
-const SIGNAL_KINDS: SignalKind[] = ["whale_sell", "holder_moved", "sell_pressure", "buy_pressure", "note"];
+const SIGNAL_KINDS: SignalKind[] = ["whale_sell", "holder_moved", "sell_pressure", "buy_pressure", "pending_sell", "pending_move", "pending_activity", "note"];
 const kinds = (x: unknown, label: string, dflt: SignalKind[]): SignalKind[] => {
   if (x === undefined) return dflt;
   if (!Array.isArray(x) || x.some((k) => !SIGNAL_KINDS.includes(k))) throw new Error(`${label} must list signal kinds from ${SIGNAL_KINDS.join(", ")}`);
@@ -188,6 +188,8 @@ function parseStream(s: any): StreamConfig | null {
     accounts,
     commitment,
     snapshot: s.snapshot === undefined ? DEFAULT_STREAM.snapshot : Boolean(s.snapshot),
+    deshred: s.deshred === undefined ? DEFAULT_STREAM.deshred : Boolean(s.deshred),
+    deshredHolders: num(s.deshredHolders, "stream.deshredHolders", 0, 1_000, DEFAULT_STREAM.deshredHolders),
   };
 }
 

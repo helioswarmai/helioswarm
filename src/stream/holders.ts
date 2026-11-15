@@ -4,6 +4,7 @@
 import { address, createSolanaRpc } from "@solana/kit";
 
 import type { TokenFlow } from "./parse";
+import type { TokenAccountIndex } from "./pending";
 
 export interface Holder {
   owner: string;
@@ -196,7 +197,7 @@ export function overhang(book: HolderBook, now: number, topN = 50, cfg: RiskConf
 }
 
 /** Seeds a book from RPC: supply plus the largest token accounts and their owners. */
-export async function snapshotHolders(rpcUrl: string, book: HolderBook, now = Date.now()) {
+export async function snapshotHolders(rpcUrl: string, book: HolderBook, now = Date.now(), index?: TokenAccountIndex) {
   const rpc = createSolanaRpc(rpcUrl);
   const mint = address(book.mint);
   const supply = await rpc.getTokenSupply(mint).send();
@@ -208,6 +209,8 @@ export async function snapshotHolders(rpcUrl: string, book: HolderBook, now = Da
   const infos = await rpc.getMultipleAccounts(accounts, { encoding: "jsonParsed" }).send();
   infos.value.forEach((acc, i) => {
     const parsed = (acc?.data as { parsed?: { info?: { owner?: string } } } | undefined)?.parsed?.info?.owner;
-    if (parsed) book.seed(parsed, BigInt(largest.value[i]!.amount), now);
+    if (!parsed) return;
+    book.seed(parsed, BigInt(largest.value[i]!.amount), now);
+    index?.set(largest.value[i]!.address, { owner: parsed, mint: book.mint });
   });
 }

@@ -10,6 +10,7 @@ import type { Signal } from "./board";
 import { AgentChainFeed, JupiterFeed, LiveFeed, SimFeed, type PriceFeed } from "./feeds";
 import { snapshotHolders } from "./stream/holders";
 import { parseTx } from "./stream/parse";
+import { decodePending, learnTokenAccounts, TokenAccountIndex } from "./stream/pending";
 import { SignalEngine } from "./stream/signals";
 import { expandGroups, loadRoster } from "./roster";
 import { Swarm } from "./swarm";
@@ -43,29 +44,59 @@ async function startStream(
 ): Promise<() => void> {
   const sc = cfg.stream!;
   const engine = new SignalEngine(mints, post, cfg.signals, opts.ourWallets);
+  const index = new TokenAccountIndex();
   if (sc.snapshot) {
     if (!rpcUrl) console.warn("[stream] no SOLANA_RPC_URL: skipping the holder snapshot, shares use tracked balances until supply is known.");
     else
       for (const book of engine.books.values()) {
-        await snapshotHolders(rpcUrl, book).catch((e) => console.warn(`[stream] snapshot ${book.mint}: ${(e as Error).message}`));
+        await snapshotHolders(rpcUrl, book, Date.now(), index).catch((e) => console.warn(`[stream] snapshot ${book.mint}: ${(e as Error).message}`));
         console.warn(`[stream] ${book.mint}: supply ${book.supplyRaw ?? "?"}, ${book.holders.size} top holders loaded`);
       }
   }
-  const { SvsStream } = await import("./stream/svs");
+  const { SvsStream, DeshredStream } = await import("./stream/svs");
   const stream = new SvsStream(sc, mints);
   const targets = new Set(mints);
   stream.on("status", (m: string) => console.warn(`[stream] ${m}`));
   stream.on("error", (e: Error) => console.warn(`[stream] error: ${e.message}`));
   stream.on("tx", (tx) => {
+    learnTokenAccounts(tx, targets, index);
     const parsed = parseTx(tx, targets);
+    const early = engine.seenEarly(tx.signature, tx.ts);
     for (const f of parsed.flows) {
       if (f.priceSol) opts.feed?.observe(f.mint, f.priceSol, f.ts, f.decimals);
-      opts.onFlow?.({ ts: new Date(f.ts).toISOString(), event: "flow", kind: f.kind, mint: f.mint, owner: f.owner, tokens: f.tokens, sol: +f.sol.toFixed(6), priceSol: f.priceSol, sig: f.signature, ...(f.counterparty ? { counterparty: f.counterparty } : {}) });
+      opts.onFlow?.({ ts: new Date(f.ts).toISOString(), event: "flow", kind: f.kind, mint: f.mint, owner: f.owner, tokens: f.tokens, sol: +f.sol.toFixed(6), priceSol: f.priceSol, sig: f.signature, ...(f.counterparty ? { counterparty: f.counterparty } : {}), ...(early != null ? { seenEarlyMs: early } : {}) });
     }
     engine.ingest(parsed);
   });
   await stream.start();
-  return () => stream.stop();
+
+  let deshred: InstanceType<typeof DeshredStream> | null = null;
+  let refresh: NodeJS.Timeout | undefined;
+  if (sc.deshred) {
+    // Watch the mints plus the top holders' wallets and token accounts, so transfers
+    // and swaps that never name the mint (plain SPL transfers, Raydium v4) are still caught.
+    const filter = () => {
+      const wallets = engine.topHolderWallets(sc.deshredHolders);
+      const accs = mints.flatMap((m) => index.accountsOf(m, wallets));
+      return [...mints, ...wallets, ...accs].slice(0, 1_000);
+    };
+    deshred = new DeshredStream(sc, filter());
+    deshred.on("status", (m: string) => console.warn(`[stream] ${m}`));
+    deshred.on("error", (e: Error) => console.warn(`[stream] error: ${e.message}`));
+    deshred.on("pending", (tx) => {
+      const intents = decodePending(tx, targets, index);
+      for (const i of intents) opts.onFlow?.({ ts: new Date(i.ts).toISOString(), event: "pending", kind: i.kind, mint: i.mint, owner: i.owner, venue: i.venue, amountRaw: i.amountRaw?.toString(), to: i.to, sig: i.signature });
+      engine.ingestPending(intents);
+    });
+    await deshred.start();
+    refresh = setInterval(() => deshred!.setAccounts(filter()), 60_000);
+    refresh.unref();
+  }
+  return () => {
+    stream.stop();
+    deshred?.stop();
+    if (refresh) clearInterval(refresh);
+  };
 }
 
 async function main() {
