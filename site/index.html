@@ -160,14 +160,14 @@ p { text-wrap: pretty; }
 .bar.hot i.on { background: var(--sun); }
 
 /* second section */
-section { position: relative; padding-block: calc(var(--g) * 3 - 40px) var(--g); }
+section { position: relative; padding-block: calc(var(--g) * 2 - 40px) calc(var(--g) * 2); }
 section::before {
-  content: ""; position: absolute; z-index: 0; left: 0; right: 0; top: 0;
+  content: ""; position: absolute; z-index: 0; left: 0; right: 0; bottom: 0;
   height: max(46.7vw, calc(var(--g) * 5)); max-height: 100%; pointer-events: none;
-  background: url("img/gale-crater.jpg") center top / cover no-repeat;
+  background: url("img/gale-crater.jpg") center bottom / cover no-repeat;
   filter: grayscale(1) contrast(1.15); opacity: 0.42;
-  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 30%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 0%, #000 30%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, rgba(0, 0, 0, 0.5) 62%, #000 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, rgba(0, 0, 0, 0.5) 62%, #000 100%);
 }
 section > .wrap { position: relative; z-index: 2; }
 h2 { display: flex; align-items: center; gap: 12px; margin: 0 0 24px; font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg); }
