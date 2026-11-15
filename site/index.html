@@ -38,12 +38,16 @@
 *, *::before, *::after { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body {
-  margin: 0; color: var(--fg);
+  margin: 0; color: var(--fg); position: relative; isolation: isolate;
   background-color: var(--bg);
-  background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
-  background-size: var(--g) var(--g); background-position: var(--padl) var(--top);
   font-family: var(--sans); font-size: 16px; line-height: 24px;
   -webkit-font-smoothing: antialiased; overflow-x: hidden;
+}
+/* the page grid is its own layer: images sit under it, content sits over it */
+body::before {
+  content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+  background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+  background-size: var(--g) var(--g); background-position: var(--padl) var(--top);
 }
 h1, h2, h3, p, ul, ol, dl, dd, figure { margin: 0; padding: 0; }
 ul, ol { list-style: none; }
@@ -101,7 +105,7 @@ p { text-wrap: pretty; }
 .btn::before { content: "[ "; white-space: pre; } .btn::after { content: " ]"; white-space: pre; }
 
 /* hero: the whole viewport is the swarm; type sits in the corners */
-.hero { position: relative; overflow: hidden; min-height: 100vh; min-height: 100svh; display: flex; border-bottom: 1px solid var(--line); }
+.hero { position: relative; z-index: 2; overflow: hidden; min-height: 100vh; min-height: 100svh; display: flex; border-bottom: 1px solid var(--line); }
 #swarm { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: pan-y; }
 #swarm.dragging { cursor: grabbing; }
 .overlay {
@@ -122,13 +126,14 @@ p { text-wrap: pretty; }
 .brief { display: grid; gap: 4px; font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .brief li { padding-left: 2ch; text-indent: -2ch; }
 .brief li::before { content: "> "; white-space: pre; color: var(--sun); }
-.cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+.cta-row { grid-row: 4; grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 12px; pointer-events: auto; }
 @media (min-width: 768px) {
   .legend { display: block; }
   .hero h1 { font-size: 36px; line-height: 40px; }
 }
 @media (min-width: 1024px) {
   .hero-copy { grid-column: 1; }
+  .cta-row { grid-row: 3; grid-column: 2; align-self: end; justify-self: end; }
   .hero h1 { font-size: 48px; line-height: 1; }
 }
 
@@ -155,14 +160,19 @@ p { text-wrap: pretty; }
 .bar.hot i.on { background: var(--sun); }
 
 /* second section */
-section { padding-block: calc(var(--g) - 40px) var(--g); }
+section { position: relative; padding-block: calc(var(--g) * 3 - 40px) var(--g); }
+section::before {
+  content: ""; position: absolute; z-index: 0; left: 0; right: 0; top: 0;
+  height: max(46.7vw, calc(var(--g) * 5)); max-height: 100%; pointer-events: none;
+  background: url("img/gale-crater.jpg") center top / cover no-repeat;
+  filter: grayscale(1) contrast(1.15); opacity: 0.42;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 30%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 30%, transparent 100%);
+}
+section > .wrap { position: relative; z-index: 2; }
 h2 { display: flex; align-items: center; gap: 12px; margin: 0 0 24px; font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg); }
 h2::before { content: "//"; color: var(--sun); }
 h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-.plate { position: relative; margin: 0 0 var(--g); }
-.plate img { display: block; width: 100%; height: calc(var(--g) * 3); object-fit: cover; }
-.plate figcaption { position: absolute; left: 12px; top: 12px; color: var(--fg); }
-@media (min-width: 768px) { .plate img { height: calc(var(--g) * 4); } .plate figcaption { left: 16px; top: 16px; } }
 .run-grid { display: grid; gap: var(--g) 0; }
 @media (min-width: 900px) { .run-grid { grid-template-columns: calc(var(--g) * var(--half, 6)) minmax(0, 1fr); align-items: start; } .run-grid > :first-child { padding-right: 40px; } }
 .caps { display: grid; gap: 16px; margin: 0; padding: 0; list-style: none; counter-reset: cap; }
@@ -183,7 +193,7 @@ h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .copy:hover { border-color: var(--fg); }
 .copy:active { transform: scale(0.98); }
 
-footer { padding-block: 40px; border-top: 1px solid var(--line); }
+footer { position: relative; z-index: 2; padding-block: 40px; border-top: 1px solid var(--line); }
 .foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 24px; }
 .foot nav { display: flex; gap: 24px; flex-wrap: wrap; }
 .foot nav a { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); text-decoration: none; transition: color 700ms var(--ease); }
@@ -229,20 +239,16 @@ STATUS ...... <b id="status">NOMINAL</b></pre>
         <li>Autonomous trading agents for Solana tokens</li>
         <li>Every unit: own mind, own wallet, one shared board</li>
       </ul>
-      <div class="cta-row">
-        <a class="btn" href="#install">Install</a>
-        <a class="btn ghost" href="https://github.com/helioswarmai/helioswarm" rel="noopener">GitHub</a>
-      </div>
+    </div>
+    <div class="cta-row">
+      <a class="btn" href="#install">Install</a>
+      <a class="btn ghost" href="https://github.com/helioswarmai/helioswarm" rel="noopener">GitHub</a>
     </div>
   </div>
 </div>
 
 <section id="install">
   <div class="wrap">
-    <figure class="plate rv">
-      <img src="img/europa.jpg" width="2000" height="571" alt="Inverted surface map of Europa: a dense web of bright lines crossing a black field" loading="lazy">
-      <figcaption class="label">Plate 01 // Europa surface map // NASA</figcaption>
-    </figure>
     <div class="run-grid rv">
       <div>
         <h2>Capabilities</h2>
