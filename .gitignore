@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env*
+!.env.example
+*.tsbuildinfo
+.DS_Store
+
+# swarm runs
+swarm.json
+swarm.log.jsonl
+SWARM_STOP
+*.keypair.json

@@ -1,0 +1,102 @@
+{
+  "mode": "paper",
+  "tickMs": 15000,
+  "feed": {
+    "kind": "jupiter"
+  },
+  "risk": {
+    "maxTxPerMin": 10,
+    "maxBuySol": 0.05,
+    "maxSwarmSpendSol": 1,
+    "slippageBps": 300,
+    "feeBps": 100
+  },
+  "live": {
+    "jupiterUrl": "https://lite-api.jup.ag"
+  },
+  "logFile": "swarm.log.jsonl",
+  "killFile": "SWARM_STOP",
+  "plugins": [],
+  "groups": [
+    {
+      "roster": [
+        "0xsendit_kev",
+        "bagz4days_"
+      ],
+      "bankrollSol": 0.5,
+      "targets": [
+        {
+          "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+          "symbol": "BONK"
+        },
+        {
+          "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+          "symbol": "WIF"
+        }
+      ],
+      "tasks": [
+        "trade",
+        "report"
+      ],
+      "walletEnv": "SWARM_WALLET_DEGENS"
+    },
+    {
+      "preset": "sniper",
+      "count": 3,
+      "namePrefix": "sniper",
+      "bankrollSol": 0.2,
+      "targets": [
+        {
+          "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+          "symbol": "JUP"
+        }
+      ],
+      "tasks": [
+        "trade",
+        "watch",
+        "report"
+      ],
+      "rules": {
+        "takeProfitPct": 15,
+        "stopLossPct": 8,
+        "maxCoins": 1
+      },
+      "taskOptions": {
+        "watch": {
+          "alertPct": 5
+        }
+      },
+      "walletEnv": "SWARM_WALLET_SNIPERS"
+    },
+    {
+      "preset": "holder",
+      "count": 1,
+      "bankrollSol": 0.3,
+      "brain": "claude",
+      "targets": [
+        {
+          "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+          "symbol": "JUP"
+        },
+        {
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "symbol": "USDC"
+        }
+      ],
+      "tasks": [
+        "trade",
+        "watch",
+        "report"
+      ],
+      "rules": {
+        "maxSolPerCoin": 0.1
+      },
+      "taskOptions": {
+        "watch": {
+          "alertPct": 3
+        }
+      },
+      "walletEnv": "SWARM_WALLET_HOLDERS"
+    }
+  ]
+}
