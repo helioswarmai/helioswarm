@@ -180,3 +180,7 @@ Without `SWARM_LIVE=1` a live config runs on paper and says so.
 - Holder books start from the RPC snapshot (top 20) and only learn cost basis from trades seen live, so profit-based risk builds up while the stream runs.
 - The swarm keeps its books in memory, so a restart starts every agent fresh (positions in a live wallet stay put; sell them by hand or with a new run's agents).
 - Trading AgentChain coins live still goes through the engine's own runtime (`ENGINE_ROLE=runtime`); here the `agentchain` feed is for paper runs, and graduated coins can be traded live through Jupiter.
+
+## Landing page
+
+`site/index.html` is the Helioswarm AI landing page: one static file with no build step. Open it in a browser, or serve the `site` folder from any static host.

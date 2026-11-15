@@ -1,0 +1,878 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Helioswarm AI</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Helioswarm is a swarm of autonomous trading agents for Solana tokens. Each agent has its own personality and wallet, and all of them read one shared board. Paper trading is the default.">
+<meta property="og:title" content="Helioswarm AI">
+<meta property="og:description" content="A swarm of autonomous trading agents for Solana tokens. Paper trading by default.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#131209">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23131209'/%3E%3Cellipse cx='16' cy='16' rx='13' ry='6' transform='rotate(-20 16 16)' fill='none' stroke='%23F2EFE6' stroke-width='1.5'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23FF8A3D'/%3E%3Crect x='25' y='9' width='4' height='4' fill='%23BFE9EC'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a dark star chart. One live orbit diagram carries the page; everything else is quiet type on a ruled grid. */
+:root {
+  color-scheme: dark;
+  --bg: #131209;
+  --surface: #181818;
+  --surface-2: #1F1F1F;
+  --fg: #F2EFE6;
+  --muted: #9B9B9B;
+  --dim: #5E5C55;
+  --line: #313131;
+  --sun: #FF8A3D;
+  --sun-core: #FFF3DC;
+  --ice: #BFE9EC;
+  --sans: "Geist", "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 24px;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+h1, h2, h3, p, ul, ol, dl, dd, figure { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+a { color: inherit; }
+h1, h2, h3 { font-weight: 500; text-wrap: balance; }
+p { text-wrap: pretty; }
+:focus-visible { outline: 2px solid var(--ice); outline-offset: 3px; }
+::selection { background: var(--sun); color: var(--bg); }
+
+.grain {
+  position: fixed; inset: 0; z-index: 40; pointer-events: none; opacity: 0.11;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.skip {
+  position: absolute; left: 16px; top: -64px; z-index: 60;
+  background: var(--fg); color: var(--bg); padding: 8px 12px; font-weight: 600; font-size: 14px;
+  transition: top 700ms var(--ease);
+}
+.skip:focus { top: calc(env(safe-area-inset-top, 0px) + 16px); }
+
+.wrap {
+  max-width: 1232px; margin-inline: auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+@media (min-width: 768px) {
+  .wrap { padding-left: max(32px, env(safe-area-inset-left, 0px)); padding-right: max(32px, env(safe-area-inset-right, 0px)); }
+}
+
+/* mono utility text */
+.label {
+  font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.label b { font-weight: 500; color: var(--fg); }
+.sun { color: var(--sun); }
+.ice { color: var(--ice); }
+
+/* nav island */
+.nav {
+  position: fixed; z-index: 50; left: 0; right: 0;
+  top: calc(env(safe-area-inset-top, 0px) + 24px);
+  display: flex; justify-content: center; pointer-events: none;
+  padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px));
+}
+.island {
+  pointer-events: auto; display: flex; align-items: center; gap: 24px;
+  padding: 8px 8px 8px 16px; border-radius: 9999px;
+  background: rgba(24, 24, 24, 0.72); border: 1px solid var(--line);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+}
+.brand { display: flex; align-items: center; gap: 8px; text-decoration: none; font-weight: 600; font-size: 14px; line-height: 20px; }
+.brand svg { display: block; }
+.island ul { display: none; gap: 24px; }
+.island ul a {
+  font-size: 14px; line-height: 20px; text-decoration: none; color: var(--muted);
+  transition: color 700ms var(--ease);
+}
+.island ul a:hover, .island ul a[aria-current="true"] { color: var(--fg); }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--sans); font-size: 16px; line-height: 24px; font-weight: 600;
+  padding: 8px 12px; border-radius: 2px; border: 1px solid var(--fg);
+  background: var(--fg); color: var(--bg); text-decoration: none; cursor: pointer;
+  transition: background-color 700ms var(--ease), color 700ms var(--ease), border-color 700ms var(--ease), transform 300ms var(--ease);
+}
+.btn:hover { background: var(--sun); border-color: var(--sun); }
+.btn:active { transform: scale(0.98); }
+.btn.ghost { background: transparent; color: var(--fg); border-color: var(--line); }
+.btn.ghost:hover { border-color: var(--fg); background: transparent; }
+.btn.sm { font-size: 14px; line-height: 20px; border-radius: 9999px; }
+.island .btn.sm { display: none; }
+.burger {
+  position: relative; width: 32px; height: 32px; border-radius: 9999px;
+  border: 1px solid var(--line); background: transparent; cursor: pointer;
+}
+.burger span {
+  position: absolute; left: 8px; right: 8px; top: 50%; height: 1px; background: var(--fg);
+  transition: transform 700ms var(--ease);
+}
+.burger span:first-child { transform: translateY(-4px); }
+.burger span:last-child { transform: translateY(4px); }
+.burger[aria-expanded="true"] span:first-child { transform: rotate(45deg); }
+.burger[aria-expanded="true"] span:last-child { transform: rotate(-45deg); }
+.sheet {
+  position: fixed; inset: 0; z-index: 45; display: flex; flex-direction: column; justify-content: center;
+  padding: 96px max(24px, env(safe-area-inset-right, 0px)) 48px max(24px, env(safe-area-inset-left, 0px));
+  background: rgba(0, 0, 0, 0.8); -webkit-backdrop-filter: blur(64px); backdrop-filter: blur(64px);
+  opacity: 0; visibility: hidden;
+  transition: opacity 700ms var(--ease), visibility 0s linear 700ms;
+}
+.sheet.open { opacity: 1; visibility: visible; transition: opacity 700ms var(--ease), visibility 0s; }
+.sheet li { overflow: hidden; }
+.sheet a {
+  display: block; padding-block: 12px; font-size: 36px; line-height: 40px; font-weight: 500; text-decoration: none;
+  transform: translateY(48px); opacity: 0;
+  transition: transform 700ms var(--ease), opacity 700ms var(--ease);
+}
+.sheet.open a { transform: none; opacity: 1; }
+.sheet.open li:nth-child(1) a { transition-delay: 100ms; }
+.sheet.open li:nth-child(2) a { transition-delay: 150ms; }
+.sheet.open li:nth-child(3) a { transition-delay: 200ms; }
+.sheet.open li:nth-child(4) a { transition-delay: 250ms; }
+.sheet.open li:nth-child(5) a { transition-delay: 300ms; }
+@media (min-width: 900px) {
+  .island ul { display: flex; }
+  .island .btn.sm { display: inline-flex; }
+  .burger, .sheet { display: none; }
+}
+
+/* hero */
+.hero { padding-block: 128px 64px; }
+.hero-grid { display: grid; gap: 48px; align-items: center; }
+.hero-copy { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.hero h1 {
+  max-width: 680px; font-size: 36px; line-height: 40px; letter-spacing: -0.03em;
+  background: linear-gradient(90deg, #FFFFFF, #9B9B9B); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.hero h1 br { display: none; }
+.hero .sub { max-width: 680px; font-size: 18px; line-height: 28px; color: var(--muted); }
+.cta-row { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.cta-row .label { max-width: 240px; }
+@media (min-width: 640px) { .hero h1 { font-size: 48px; line-height: 1; } }
+@media (min-width: 1024px) {
+  .hero { padding-block: 160px 80px; }
+  .hero-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; }
+  .hero h1 br { display: inline; }
+}
+
+.scope { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.scope-head, .scope-foot { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.scope-frame { position: relative; border: 1px solid var(--line); }
+.scope-frame::before, .scope-frame::after {
+  content: ""; position: absolute; width: 8px; height: 8px; border: 1px solid var(--fg); pointer-events: none;
+}
+.scope-frame::before { left: -1px; top: -1px; border-right: 0; border-bottom: 0; }
+.scope-frame::after { right: -1px; bottom: -1px; border-left: 0; border-top: 0; }
+#swarm { display: block; width: 100%; aspect-ratio: 100 / 70; max-width: 100%; cursor: crosshair; touch-action: pan-y; }
+.hud { display: grid; gap: 12px; }
+@media (min-width: 560px) { .hud { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.panel { border: 1px solid var(--line); background: var(--surface); padding: 12px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.panel-head { display: flex; justify-content: space-between; gap: 8px; }
+.readout-name { font-family: var(--mono); font-size: 14px; line-height: 20px; }
+.traits { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; align-items: center; }
+.traits dt, .traits dd { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; }
+.traits dt { color: var(--muted); }
+.traits dd.num { color: var(--fg); font-variant-numeric: tabular-nums; text-align: right; }
+.bar { display: grid; grid-template-columns: repeat(16, 1fr); gap: 2px; }
+.bar i { height: 8px; background: var(--line); }
+.bar i.on { background: var(--fg); }
+.bar.hot i.on { background: var(--sun); }
+.feed { display: flex; flex-direction: column; gap: 4px; font-family: var(--mono); font-size: 12px; line-height: 16px; min-height: 96px; }
+.feed li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.feed li:first-child { color: var(--fg); }
+.feed .buy { color: var(--ice); }
+.feed .sell, .feed .sig { color: var(--sun); }
+
+.facts { margin-top: 64px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--line); }
+.facts div { padding: 16px; display: flex; flex-direction: column; gap: 4px; border: 0 solid var(--line); }
+.facts div:nth-child(odd) { border-right-width: 1px; }
+.facts div:nth-child(-n+2) { border-bottom-width: 1px; }
+.facts strong { font-family: var(--mono); font-weight: 500; font-size: 24px; line-height: 32px; font-variant-numeric: tabular-nums; }
+@media (min-width: 900px) {
+  .facts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .facts div:nth-child(n) { border-bottom-width: 0; border-right-width: 1px; }
+  .facts div:last-child { border-right-width: 0; }
+}
+
+/* sections */
+section { padding-block: 64px; }
+@media (min-width: 900px) { section { padding-block: 96px; } }
+.sec-head { display: flex; flex-direction: column; gap: 16px; margin-bottom: 48px; }
+.sec-head .rule { display: flex; align-items: center; gap: 12px; }
+.sec-head .rule::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.sec-head h2 { font-size: 30px; line-height: 36px; letter-spacing: -0.02em; max-width: 680px; }
+.sec-head p { color: var(--muted); max-width: 680px; }
+@media (min-width: 900px) { .sec-head h2 { font-size: 36px; line-height: 40px; } }
+
+.tagline { padding-block: 96px; }
+.tagline p { max-width: 680px; font-size: 36px; line-height: 40px; letter-spacing: -0.03em; font-weight: 500; }
+.tagline .w { color: var(--fg); opacity: 0.3; transition: opacity 700ms var(--ease); }
+.tagline .w.on { opacity: 1; }
+@media (min-width: 900px) { .tagline { padding-block: 160px; } .tagline p { font-size: 60px; line-height: 1; } }
+
+.cards { display: grid; gap: 16px; }
+@media (min-width: 640px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1024px) { .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.card {
+  border: 1px solid var(--line); background: var(--surface); padding: 24px; min-width: 0;
+  display: flex; flex-direction: column; gap: 16px;
+  transition: border-color 700ms var(--ease), transform 700ms var(--ease);
+}
+.card:hover { border-color: var(--muted); transform: translateY(-2px); }
+.card h3 { font-size: 20px; line-height: 28px; }
+.card p { color: var(--muted); font-size: 14px; line-height: 20px; flex: 1; }
+.card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+
+.benefits { display: grid; gap: 0; border: 1px solid var(--line); }
+.benefits li { padding: 24px; display: grid; gap: 8px; border: 0 solid var(--line); border-bottom-width: 1px; min-width: 0; }
+.benefits li:last-child { border-bottom-width: 0; }
+.benefits h3 { font-size: 18px; line-height: 28px; }
+.benefits p { color: var(--muted); font-size: 14px; line-height: 20px; }
+@media (min-width: 900px) {
+  .benefits li { grid-template-columns: minmax(0, 4fr) minmax(0, 6fr) auto; gap: 32px; align-items: baseline; }
+}
+code, .code { font-family: var(--mono); font-size: 0.875em; }
+p code, td code, li code { color: var(--fg); background: var(--surface-2); padding: 2px 4px; }
+
+.steps { display: grid; gap: 16px; counter-reset: step; }
+@media (min-width: 900px) { .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.steps li { counter-increment: step; border: 1px solid var(--line); padding: 24px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.steps li::before { content: "T" counter(step); font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; color: var(--sun); }
+.steps h3 { font-size: 20px; line-height: 28px; }
+.steps p { color: var(--muted); font-size: 14px; line-height: 20px; }
+
+.scroll-x { overflow-x: auto; border: 1px solid var(--line); }
+table { width: 100%; border-collapse: collapse; min-width: 640px; }
+th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 14px; line-height: 20px; }
+tr:last-child td { border-bottom: 0; }
+th { font-family: var(--mono); font-weight: 400; font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); background: var(--surface); }
+td { color: var(--muted); }
+td:first-child { font-family: var(--mono); color: var(--fg); white-space: nowrap; }
+.tag { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; }
+.tag::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; background: currentColor; }
+
+.rails { display: grid; gap: 16px; }
+@media (min-width: 900px) { .rails { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px; align-items: start; } }
+.limits { border: 1px solid var(--line); }
+.limits div { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 12px 16px; border: 0 solid var(--line); border-bottom-width: 1px; }
+.limits div:last-child { border-bottom-width: 0; }
+.limits dt { color: var(--muted); font-size: 14px; line-height: 20px; }
+.limits dd { font-family: var(--mono); font-size: 14px; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rails-copy { display: flex; flex-direction: column; gap: 16px; }
+.rails-copy p { color: var(--muted); }
+.rails-copy p strong { color: var(--fg); font-weight: 500; }
+
+.term { border: 1px solid var(--line); background: var(--surface); min-width: 0; }
+.term-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--line); }
+.term pre { margin: 0; padding: 16px; overflow-x: auto; font-family: var(--mono); font-size: 14px; line-height: 24px; color: var(--fg); }
+.term pre .c { color: var(--dim); }
+.copy {
+  font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 8px 12px; background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 2px; cursor: pointer;
+  transition: border-color 700ms var(--ease), color 700ms var(--ease), transform 300ms var(--ease);
+}
+.copy:hover { border-color: var(--fg); }
+.copy:active { transform: scale(0.98); }
+.run-grid { display: grid; gap: 24px; }
+@media (min-width: 900px) { .run-grid { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 48px; align-items: start; } }
+.run-side { display: flex; flex-direction: column; gap: 16px; align-items: flex-start; }
+.run-side p { color: var(--muted); }
+
+.faq { border-top: 1px solid var(--line); max-width: 840px; }
+.faq details { border-bottom: 1px solid var(--line); }
+.faq summary {
+  list-style: none; cursor: pointer; display: flex; justify-content: space-between; gap: 16px; align-items: baseline;
+  padding-block: 16px; font-size: 18px; line-height: 28px; font-weight: 500;
+  transition: color 700ms var(--ease);
+}
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; font-family: var(--mono); color: var(--muted); transition: transform 700ms var(--ease); }
+.faq details[open] summary::after { transform: rotate(45deg); }
+.faq summary:hover { color: var(--sun); }
+.faq details p { color: var(--muted); padding-bottom: 24px; max-width: 680px; }
+
+.final { text-align: left; }
+.final-box { border: 1px solid var(--line); padding: 32px 24px; display: flex; flex-direction: column; gap: 24px; align-items: flex-start; position: relative; }
+.final-box h2 { font-size: 36px; line-height: 40px; letter-spacing: -0.03em; max-width: 680px; }
+.final-box p { color: var(--muted); max-width: 680px; }
+@media (min-width: 900px) { .final-box { padding: 64px; } .final-box h2 { font-size: 48px; line-height: 1; } }
+
+footer { padding-block: 48px 64px; border-top: 1px solid var(--line); }
+.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 24px; }
+.foot p { color: var(--muted); font-size: 14px; line-height: 20px; max-width: 520px; }
+.foot nav { display: flex; gap: 24px; flex-wrap: wrap; }
+.foot nav a { font-size: 14px; line-height: 20px; color: var(--muted); text-decoration: none; transition: color 700ms var(--ease); }
+.foot nav a:hover { color: var(--fg); }
+
+/* scroll reveal: only when script is running, and never for reduced motion */
+.js .rv { opacity: 0; transform: translateY(64px); filter: blur(12px); transition: opacity 900ms var(--ease), transform 900ms var(--ease), filter 900ms var(--ease); }
+.js .rv.in { opacity: 1; transform: none; filter: none; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .js .rv { opacity: 1; transform: none; filter: none; transition: none; }
+  .tagline .w { opacity: 1; transition: none; }
+  * { transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="island">
+    <a class="brand" href="#top" aria-label="Helioswarm AI, back to top">
+      <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="16" rx="14" ry="6" transform="rotate(-20 16 16)" fill="none" stroke="#F2EFE6" stroke-width="1.5"/><circle cx="16" cy="16" r="4" fill="#FF8A3D"/><rect x="26" y="8" width="4" height="4" fill="#BFE9EC"/></svg>
+      Helioswarm
+    </a>
+    <nav aria-label="Sections">
+      <ul>
+        <li><a href="#presets">Presets</a></li>
+        <li><a href="#swarm-rules">The board</a></li>
+        <li><a href="#rails">Guard rails</a></li>
+        <li><a href="#faq">Questions</a></li>
+      </ul>
+    </nav>
+    <a class="btn sm" href="#run">Run it in paper mode</a>
+    <button class="burger" id="burger" type="button" aria-expanded="false" aria-controls="sheet" aria-label="Menu"><span></span><span></span></button>
+  </div>
+</header>
+<div class="sheet" id="sheet">
+  <ul>
+    <li><a href="#presets">Presets</a></li>
+    <li><a href="#swarm-rules">The board</a></li>
+    <li><a href="#rails">Guard rails</a></li>
+    <li><a href="#faq">Questions</a></li>
+    <li><a href="#run" class="sun">Run it in paper mode</a></li>
+  </ul>
+</div>
+
+<main id="main">
+<div id="top"></div>
+
+<div class="hero">
+  <div class="wrap">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <p class="label"><b>Helioswarm AI</b> / Solana / agent swarm</p>
+        <h1>A swarm of autonomous<br> trading agents<br> for Solana tokens</h1>
+        <p class="sub">Each agent has its own personality and its own wallet. All of them read one shared board before they act, so the swarm spreads out, gets out together and never trades against itself.</p>
+        <div class="cta-row">
+          <a class="btn" href="#run">Run it in paper mode</a>
+          <p class="label">Paper trading is the default. No real funds move until you switch it on twice.</p>
+        </div>
+      </div>
+
+      <figure class="scope" aria-label="Animated diagram of fourteen simulated agents orbiting a shared board">
+        <div class="scope-head">
+          <p class="label"><b>Heliocentric view</b> / shared board at origin</p>
+          <p class="label" id="tick">T+0000</p>
+        </div>
+        <div class="scope-frame"><canvas id="swarm" role="img" aria-label="Fourteen agents drawn as small squares on six orbits around a dithered sun. Orbit distance shows paranoia, speed shows patience, direction shows contrarian, and wobble shows risk."></canvas></div>
+        <div class="scope-foot">
+          <p class="label">Ring = paranoia / speed = patience / reverse = contrarian / wobble = risk</p>
+          <p class="label">Simulated run. No live data.</p>
+        </div>
+        <div class="hud">
+          <div class="panel">
+            <div class="panel-head"><p class="label">Tracking</p><p class="label" id="r-state">hold</p></div>
+            <p class="readout-name" id="r-name">sniper 2</p>
+            <dl class="traits" id="r-traits"></dl>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><p class="label">Event log</p><p class="label">JSON lines</p></div>
+            <ul class="feed" id="feed" aria-hidden="true"></ul>
+          </div>
+        </div>
+      </figure>
+    </div>
+
+    <div class="facts">
+      <div><strong>6</strong><span class="label">personality presets</span></div>
+      <div><strong>15 s</strong><span class="label">default tick</span></div>
+      <div><strong>0.05 SOL</strong><span class="label">largest single buy by default</span></div>
+      <div><strong>1 : 1</strong><span class="label">wallets to agents</span></div>
+    </div>
+  </div>
+</div>
+
+<section class="tagline" aria-label="Tagline">
+  <div class="wrap">
+    <p id="tagline">Every agent thinks for itself. The swarm moves as one.</p>
+  </div>
+</section>
+
+<section id="presets">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="label rule"><b>Presets</b> / 6</p>
+      <h2>Six personalities, stamped out as many times as you like</h2>
+      <p>A preset is a set of traits scored from 0 to 255. Deploy one agent or thirty from the same preset, or bring named agents from the roster with their persona and rules intact.</p>
+    </div>
+    <div class="cards" id="cards"></div>
+  </div>
+</section>
+
+<section id="swarm-rules">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="label rule"><b>The board</b> / shared state</p>
+      <h2>What the swarm does that a lone bot cannot</h2>
+      <p>Every agent reads one board before it decides. The board shows what the others hold, what any of them just sold and every live signal about a coin.</p>
+    </div>
+    <ul class="benefits rv">
+      <li><h3>It gets out together</h3><p>A whale sale or a large holder moving tokens sells every agent out of that coin at once, between ticks.</p><span class="tag sun">exit</span></li>
+      <li><h3>It never buys from itself</h3><p>After any agent sells a coin, no agent buys it for 30 seconds.</p><span class="tag ice">30 s lock</span></li>
+      <li><h3>It spreads out</h3><p>Cap how many agents hold one coin and how much SOL the whole swarm puts into it.</p><span class="tag">caps</span></li>
+      <li><h3>It reads the chain as it lands</h3><p>An optional gRPC stream turns every transaction on your targets into buys, sells and wallet moves, and can flag a large sell once it sits in a block and before it executes.</p><span class="tag ice">stream</span></li>
+      <li><h3>It does more than trade</h3><p>Groups also run price alerts with a webhook, and equity reports every 20 ticks. Add your own task with <code>registerTask()</code>.</p><span class="tag">3 tasks</span></li>
+    </ul>
+
+    <div class="sec-head rv" style="margin-top:64px">
+      <p class="label rule"><b>Signals</b> / 7</p>
+      <h2>Seven signals reach the board</h2>
+    </div>
+    <div class="scroll-x rv">
+      <table>
+        <thead><tr><th>Signal</th><th>Fires when</th><th>The swarm</th></tr></thead>
+        <tbody>
+          <tr><td>whale_sell</td><td>One sale of at least 1% of supply</td><td><span class="tag sun">exits now</span></td></tr>
+          <tr><td>holder_moved</td><td>A holder with at least 1% of supply moves tokens to another wallet</td><td><span class="tag sun">exits now</span></td></tr>
+          <tr><td>pending_move</td><td>The same move, seen in a block before it executes</td><td><span class="tag sun">exits now</span></td></tr>
+          <tr><td>pending_sell</td><td>A holder's sale is in a block and not yet executed</td><td><span class="tag sun">exits if large</span></td></tr>
+          <tr><td>sell_pressure</td><td>Likely sellers among the top 50 holders reach 15% of supply</td><td><span class="tag">blocks buys</span></td></tr>
+          <tr><td>pending_activity</td><td>A large holder touches its bag through an unknown program</td><td><span class="tag">blocks buys</span></td></tr>
+          <tr><td>buy_pressure</td><td>At least 8 wallets put in 5 SOL net within 120 seconds</td><td><span class="tag ice">can wake agents</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="label rv" style="margin-top:12px">Thresholds shown are the defaults. All of them are yours to tune.</p>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="label rule"><b>Sequence</b> / config to first tick</p>
+      <h2>Three steps to a running swarm</h2>
+    </div>
+    <ol class="steps rv">
+      <li><h3>Write the groups</h3><p>One JSON file. Each group names its agents or a preset and a count, a bankroll per agent, the token mints it may trade and the tasks it runs.</p></li>
+      <li><h3>Start it on paper</h3><p>Prices come from Jupiter or an offline simulator. Fills, refused orders, alerts and reports land as JSON lines on screen and in a log file.</p></li>
+      <li><h3>Let it tick</h3><p>Every 15 seconds each agent applies your take profit, stop loss and time exit rules, then its brain decides to buy, sell or hold.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="rails">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="label rule"><b>Guard rails</b> / defaults</p>
+      <h2>Built to lose nothing until you say so</h2>
+    </div>
+    <div class="rails rv">
+      <dl class="limits">
+        <div><dt>Mode</dt><dd>paper</dd></div>
+        <div><dt>Largest single buy</dt><dd>0.05 SOL</dd></div>
+        <div><dt>Total swarm spend</dt><dd>1 SOL</dd></div>
+        <div><dt>Orders per minute, whole swarm</dt><dd>10</dd></div>
+        <div><dt>Slippage</dt><dd>300 bps</dd></div>
+        <div><dt>Kept back for fees, per wallet</dt><dd>0.01 SOL</dd></div>
+        <div><dt>Stop everything</dt><dd>Ctrl C or kill file</dd></div>
+      </dl>
+      <div class="rails-copy">
+        <p><strong>Live trading takes two switches.</strong> The config must say <code>"mode": "live"</code> and the environment must have <code>SWARM_LIVE=1</code>. With only one of them, the run stays on paper and says so.</p>
+        <p><strong>Keys never go in the config.</strong> Every agent signs from its own keypair file, and its spend is capped by both its bankroll and what the wallet really holds.</p>
+        <p><strong>Every order passes the same checks.</strong> Buy size, agent cash, per coin rules, the swarm spend ceiling and the order rate all apply to built in tasks and to your own.</p>
+        <p><strong>No fake demand.</strong> Coordination is about risk. There is nothing here for staging buys across wallets or trading between the swarm's own wallets.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="run">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="label rule"><b>Run</b> / paper mode</p>
+      <h2>Run it in paper mode</h2>
+      <p>You need Node and pnpm. No wallet, no RPC and no model key are required for a paper run.</p>
+    </div>
+    <div class="run-grid rv">
+      <div class="term">
+        <div class="term-head"><span class="label">Terminal</span><button class="copy" id="copy" type="button">Copy</button></div>
+<pre id="cmd"><span class="c"># get the code</span>
+git clone https://github.com/helioswarmai/helioswarm
+cd helioswarm &amp;&amp; pnpm install
+
+<span class="c"># choose targets, groups and limits</span>
+cp swarm.example.json swarm.json
+
+<span class="c"># a bounded paper run of 50 ticks</span>
+pnpm start -- --config swarm.json --ticks 50</pre>
+      </div>
+      <div class="run-side">
+        <p>The example config deploys two roster agents on BONK and WIF and three snipers on JUP. When the run ends it prints each agent's equity and profit or loss.</p>
+        <a class="btn ghost" href="https://github.com/helioswarmai/helioswarm" rel="noopener">Open the repository</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="label rule"><b>Questions</b> / 7</p>
+      <h2>Questions people ask first</h2>
+    </div>
+    <div class="faq rv">
+      <details><summary>Does it trade real money?</summary><p>Not by default. Every run is a paper run unless the config says live and the environment has <code>SWARM_LIVE=1</code>. Live swaps go through Jupiter from each agent's own wallet.</p></details>
+      <details><summary>Which tokens can it trade?</summary><p>Any Solana token that Jupiter can price and swap. You list the mints each group may trade, and agents touch nothing else.</p></details>
+      <details><summary>Do I need an AI model key?</summary><p>No. The default brain reads the agent's traits and needs no model. An optional brain asks Claude with the agent's persona and falls back to traits if the call fails.</p></details>
+      <details><summary>How do I stop it?</summary><p>Press Ctrl C or create the kill file, named <code>SWARM_STOP</code> by default. The swarm stops and prints a final summary with each agent's equity and profit or loss.</p></details>
+      <details><summary>Where do the keys live?</summary><p>One keypair file per agent in a wallets folder beside your config. The folder is ignored by git, so back it up yourself. Deleting a file loses whatever that wallet holds.</p></details>
+      <details><summary>Can the swarm be used to move a price?</summary><p>It is not built for that. The board exists so agents spread out, exit together and avoid buying from each other. It has no way to stage buys to look like organic demand.</p></details>
+      <details><summary>What are the limits today?</summary><p>Books live in memory, so a restart starts every agent fresh while live positions stay in their wallets. Live fills are booked at the quoted amount. The decoders for sells seen before execution are untested against live traffic, so check them in watch mode first.</p></details>
+    </div>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap">
+    <div class="final-box scope-frame rv">
+      <p class="label"><b>Launch window</b> / open</p>
+      <h2>Put a swarm in orbit this afternoon</h2>
+      <p>Start on paper with the example config, watch the log and tune the limits. Go live only when the numbers earn it.</p>
+      <a class="btn" href="#run">Run it in paper mode</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <p>Helioswarm is open software, not financial advice. Trading tokens can lose everything you put in.</p>
+    <nav aria-label="Footer">
+      <a href="https://github.com/helioswarmai/helioswarm" rel="noopener">GitHub</a>
+      <a href="#top">Back to top</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  document.documentElement.classList.add("js");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Trait values come from the presets in src/types.ts.
+  var PRESETS = [
+    { id: "degen", name: "Degen", goal: "Runner", n: 3, summary: "Apes in big, launches constantly, never stops talking.", t: { risk: 235, patience: 40, contrarian: 70, paranoia: 40 } },
+    { id: "showman", name: "Showman", goal: "Clout", n: 1, summary: "Lives for an audience. Launches, shills and plays to watchers.", t: { risk: 140, patience: 110, contrarian: 80, paranoia: 50 } },
+    { id: "holder", name: "Holder", goal: "Stack", n: 2, summary: "Picks carefully, sizes small and sits on positions.", t: { risk: 70, patience: 230, contrarian: 110, paranoia: 60 } },
+    { id: "contrarian", name: "Contrarian", goal: "Fade", n: 2, summary: "Buys what everyone is dumping and sells into the hype.", t: { risk: 150, patience: 160, contrarian: 235, paranoia: 100 } },
+    { id: "momentum", name: "Momentum", goal: "Stack", n: 3, summary: "Buys what is already moving and rides it until it stalls.", t: { risk: 170, patience: 90, contrarian: 30, paranoia: 130 } },
+    { id: "sniper", name: "Sniper", goal: "Hit rate", n: 3, summary: "Gets into new coins first and takes profit fast.", t: { risk: 190, patience: 25, contrarian: 90, paranoia: 200 } }
+  ];
+  var TRAITS = ["risk", "patience", "contrarian", "paranoia"];
+
+  function bar(v, hot) {
+    var on = Math.round(v / 255 * 16), s = '<span class="bar' + (hot ? " hot" : "") + '" aria-hidden="true">';
+    for (var i = 0; i < 16; i++) s += '<i' + (i < on ? ' class="on"' : "") + "></i>";
+    return s + "</span>";
+  }
+  function traitRows(t) {
+    var max = Math.max.apply(null, TRAITS.map(function (k) { return t[k]; }));
+    return TRAITS.map(function (k) {
+      return "<dt>" + k + "</dt><dd>" + bar(t[k], t[k] === max) + '</dd><dd class="num">' + t[k] + "</dd>";
+    }).join("");
+  }
+
+  // preset cards
+  document.getElementById("cards").innerHTML = PRESETS.map(function (p, i) {
+    return '<article class="card rv"><div class="card-head"><h3>' + p.name + '</h3><span class="label">Ring ' + (i + 1) + " / goal " + p.goal + "</span></div><p>" + p.summary + '</p><dl class="traits">' + traitRows(p.t) + "</dl></article>";
+  }).join("");
+
+  // scroll reveal
+  var rvs = [].slice.call(document.querySelectorAll(".rv"));
+  if ("IntersectionObserver" in window && !reduce) {
+    var io = new IntersectionObserver(function (es) {
+      es.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } });
+    }, { rootMargin: "0px 0px -8% 0px" });
+    rvs.forEach(function (el) { io.observe(el); });
+  } else rvs.forEach(function (el) { el.classList.add("in"); });
+
+  // tagline: words light up one at a time as they cross a trigger line
+  var tg = document.getElementById("tagline");
+  var words = tg.textContent.trim().split(/\s+/);
+  tg.innerHTML = words.map(function (w) { return '<span class="w">' + w + "</span>"; }).join(" ");
+  var spans = [].slice.call(tg.children), queued = false;
+  function lightWords() {
+    queued = false;
+    var r = tg.getBoundingClientRect(), vh = window.innerHeight;
+    var p = (vh * 0.85 - r.top) / (vh * 0.45 + r.height);
+    var n = Math.round(Math.max(0, Math.min(1, p)) * spans.length);
+    spans.forEach(function (s, i) { s.classList.toggle("on", i < n); });
+  }
+  if (reduce) spans.forEach(function (s) { s.classList.add("on"); });
+  else {
+    window.addEventListener("scroll", function () { if (!queued) { queued = true; requestAnimationFrame(lightWords); } }, { passive: true });
+    lightWords();
+  }
+
+  // menu
+  var burger = document.getElementById("burger"), sheet = document.getElementById("sheet");
+  function setMenu(open) { burger.setAttribute("aria-expanded", String(open)); sheet.classList.toggle("open", open); }
+  burger.addEventListener("click", function () { setMenu(burger.getAttribute("aria-expanded") !== "true"); });
+  sheet.addEventListener("click", function (e) { if (e.target.closest("a")) setMenu(false); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") setMenu(false); });
+
+  // current section in the nav
+  var links = [].slice.call(document.querySelectorAll(".island ul a"));
+  if ("IntersectionObserver" in window) {
+    var so = new IntersectionObserver(function (es) {
+      es.forEach(function (e) {
+        if (e.isIntersecting) links.forEach(function (a) { a.setAttribute("aria-current", String(a.getAttribute("href") === "#" + e.target.id)); });
+      });
+    }, { rootMargin: "-45% 0px -50% 0px" });
+    ["presets", "swarm-rules", "rails", "faq"].forEach(function (id) { so.observe(document.getElementById(id)); });
+  }
+
+  // copy the commands
+  var copyBtn = document.getElementById("copy"), cmd = document.getElementById("cmd");
+  copyBtn.addEventListener("click", function () {
+    var text = cmd.textContent.split("\n").filter(function (l) { return l && l.charAt(0) !== "#"; }).join("\n");
+    function done(ok) { copyBtn.textContent = ok ? "Copied" : "Selected"; setTimeout(function () { copyBtn.textContent = "Copy"; }, 1800); }
+    function select() { var r = document.createRange(); r.selectNodeContents(cmd); var s = getSelection(); s.removeAllRanges(); s.addRange(r); done(false); }
+    try { navigator.clipboard.writeText(text).then(function () { done(true); }, select); } catch (err) { select(); }
+  });
+
+  // ---------- the swarm ----------
+  var cv = document.getElementById("swarm"), ctx = cv.getContext("2d");
+  var css = getComputedStyle(document.documentElement);
+  function tok(n) { return css.getPropertyValue(n).trim(); }
+  var C = { fg: tok("--fg"), muted: tok("--muted"), dim: tok("--dim"), line: tok("--line"), sun: tok("--sun"), core: tok("--sun-core"), ice: tok("--ice"), bg: tok("--bg") };
+  var BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+  var ROT = -0.32, SQ = 0.46, TOKENS = ["BONK", "WIF", "JUP"];
+  var W = 0, H = 0, cx = 0, cy = 0, dpr = 1;
+
+  // seeded so every visit draws the same sky
+  var seed = 7;
+  function rnd() { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; }
+
+  var agents = [];
+  PRESETS.forEach(function (p, ring) {
+    for (var k = 0; k < p.n; k++) {
+      agents.push({
+        name: p.id + " " + (k + 1), preset: p, ring: ring,
+        a: (k / p.n) * Math.PI * 2 + rnd() * 1.4,
+        w: (0.05 + (1 - p.t.patience / 255) * 0.3) * (p.t.contrarian > 128 ? -1 : 1) * (0.9 + rnd() * 0.2),
+        amp: p.t.risk / 255 * 0.06, ph: rnd() * 6.28,
+        state: "hold", flash: -9, x: 0, y: 0
+      });
+    }
+  });
+  var stars = [];
+  for (var s = 0; s < 70; s++) stars.push([rnd(), rnd(), rnd()]);
+
+  var tracked = agents[agents.length - 2], trackedAt = 0, userPick = -99;
+  var pulses = [], time = 0, tickN = 0, nextEvent = 1.2, nextSignal = 9, feed = [];
+  var elTick = document.getElementById("tick"), elName = document.getElementById("r-name"),
+      elState = document.getElementById("r-state"), elTraits = document.getElementById("r-traits"), elFeed = document.getElementById("feed");
+
+  function ringRx(i) { var inner = W * 0.17, outer = W * 0.46; return inner + (outer - inner) * i / (PRESETS.length - 1); }
+  function place(a) {
+    var rx = ringRx(a.ring) * (1 + a.amp * Math.sin(a.a * 3 + a.ph + time * 0.7)), ry = rx * SQ;
+    var px = rx * Math.cos(a.a), py = ry * Math.sin(a.a);
+    a.x = cx + px * Math.cos(ROT) - py * Math.sin(ROT);
+    a.y = cy + px * Math.sin(ROT) + py * Math.cos(ROT);
+  }
+  function showTracked() {
+    elName.textContent = tracked.name + " / " + tracked.preset.name.toLowerCase() + " / ring " + (tracked.ring + 1);
+    elTraits.innerHTML = traitRows(tracked.preset.t);
+    showState();
+  }
+  function showState() {
+    elState.textContent = tracked.state;
+    elState.className = "label " + (tracked.state === "buy" ? "ice" : tracked.state === "hold" ? "" : "sun");
+  }
+  function log(cls, text) {
+    feed.unshift('<li><span class="' + cls + '">' + text + "</span></li>");
+    if (feed.length > 6) feed.pop();
+    elFeed.innerHTML = feed.join("");
+  }
+  function stamp() { return "T+" + ("000" + tickN).slice(-4); }
+  function act(a, side, quiet) {
+    a.state = side; a.flash = time;
+    if (!quiet) log(side === "buy" ? "buy" : "sell", stamp() + " fill " + a.name.replace(" ", "") + " " + side + " " + TOKENS[a.ring % 3] + " " + (side === "buy" ? "0.05" : (0.03 + rnd() * 0.06).toFixed(3)) + " SOL");
+    if (a === tracked) showState();
+  }
+
+  function resize() {
+    var r = cv.getBoundingClientRect();
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height; cx = W * 0.5; cy = H * 0.5;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    draw();
+  }
+
+  function drawSun() {
+    var cell = Math.max(3, Math.round(W / 170)), R = W * 0.036, ext = W * 0.17, n = Math.ceil(ext / cell);
+    for (var gy = -n; gy <= n; gy++) for (var gx = -n; gx <= n; gx++) {
+      var x = gx * cell, y = gy * cell, d = Math.sqrt(x * x + y * y);
+      if (d > ext) continue;
+      if (d < R) { ctx.fillStyle = C.core; ctx.fillRect(cx + x, cy + y, cell, cell); continue; }
+      var v = 1 - (d - R) / (ext - R);
+      v = v * v * (0.82 + 0.18 * Math.sin(time * 0.9 - d * 0.06));
+      if (v > (BAYER[(gx & 3) + ((gy & 3) << 2)] + 0.5) / 16) { ctx.fillStyle = C.sun; ctx.fillRect(cx + x, cy + y, cell - 1, cell - 1); }
+    }
+  }
+
+  function draw() {
+    if (!W) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    var i, a, g = W / 12;
+
+    // chart grid and axes
+    ctx.lineWidth = 1; ctx.strokeStyle = C.line; ctx.globalAlpha = 0.55; ctx.beginPath();
+    for (var x = cx % g; x < W; x += g) { ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, H); }
+    for (var y = cy % g; y < H; y += g) { ctx.moveTo(0, Math.round(y) + 0.5); ctx.lineTo(W, Math.round(y) + 0.5); }
+    ctx.stroke(); ctx.globalAlpha = 1;
+
+    for (i = 0; i < stars.length; i++) {
+      ctx.globalAlpha = 0.25 + 0.5 * stars[i][2];
+      ctx.fillStyle = C.muted; ctx.fillRect(Math.round(stars[i][0] * W), Math.round(stars[i][1] * H), stars[i][2] > 0.8 ? 2 : 1, stars[i][2] > 0.8 ? 2 : 1);
+    }
+    ctx.globalAlpha = 1;
+
+    drawSun();
+
+    // orbits with ring numbers on the major axis
+    ctx.font = "10px " + tok("--mono"); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (i = 0; i < PRESETS.length; i++) {
+      var rx = ringRx(i);
+      ctx.strokeStyle = i === tracked.ring ? C.muted : C.dim; ctx.setLineDash(i % 2 ? [2, 4] : []);
+      ctx.beginPath(); ctx.ellipse(cx, cy, rx, rx * SQ, ROT, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      var lx = cx - rx * Math.cos(ROT), ly = cy - rx * Math.sin(ROT);
+      ctx.fillStyle = C.bg; ctx.fillRect(lx - 6, ly - 6, 12, 12);
+      ctx.fillStyle = i === tracked.ring ? C.fg : C.muted; ctx.fillText(String(i + 1), lx, ly + 0.5);
+    }
+
+    // signal pulses
+    for (i = 0; i < pulses.length; i++) {
+      var age = time - pulses[i], pr = W * 0.5 * age / 2.4;
+      ctx.strokeStyle = C.sun; ctx.globalAlpha = Math.max(0, 1 - age / 2.4);
+      ctx.beginPath(); ctx.ellipse(cx, cy, pr, pr * SQ, ROT, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // agents
+    var size = Math.max(5, Math.round(W / 90));
+    for (i = 0; i < agents.length; i++) {
+      a = agents[i]; place(a);
+      var f = time - a.flash, col = a.state === "buy" ? C.ice : a.state === "hold" ? C.fg : C.sun;
+      if (f < 1.1) {
+        ctx.strokeStyle = col; ctx.globalAlpha = 1 - f / 1.1; ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(cx, cy); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+      }
+      var hx = Math.round(a.x - size / 2), hy = Math.round(a.y - size / 2);
+      ctx.fillStyle = C.bg; ctx.fillRect(hx - 1, hy - 1, size + 2, size + 2);
+      if (a.state === "hold") { ctx.strokeStyle = C.fg; ctx.strokeRect(hx + 0.5, hy + 0.5, size - 1, size - 1); }
+      else { ctx.fillStyle = col; ctx.fillRect(hx, hy, size, size); }
+    }
+
+    // reticle and label on the tracked agent
+    a = tracked;
+    var q = size + 6, bx = Math.round(a.x) + 0.5, by = Math.round(a.y) + 0.5, c4 = 4;
+    ctx.strokeStyle = C.fg; ctx.beginPath();
+    [[-1, -1], [1, -1], [1, 1], [-1, 1]].forEach(function (k) {
+      ctx.moveTo(bx + k[0] * q, by + k[1] * (q - c4)); ctx.lineTo(bx + k[0] * q, by + k[1] * q); ctx.lineTo(bx + k[0] * (q - c4), by + k[1] * q);
+    });
+    ctx.stroke();
+    var right = a.x < W * 0.62, tx = bx + (right ? q + 28 : -q - 28), up = a.y > H * 0.2 ? -1 : 1, ty = by + up * (q + 14);
+    ctx.strokeStyle = C.muted; ctx.beginPath(); ctx.moveTo(bx + (right ? q : -q), by + up * q); ctx.lineTo(tx - (right ? 6 : -6), ty); ctx.stroke();
+    ctx.textAlign = right ? "left" : "right"; ctx.fillStyle = C.fg;
+    ctx.fillText(a.name.toUpperCase().replace(" ", " 0"), tx, ty);
+    ctx.fillStyle = a.state === "buy" ? C.ice : a.state === "hold" ? C.muted : C.sun;
+    ctx.fillText(a.state.toUpperCase(), tx, ty + 13);
+  }
+
+  var last = 0, running = false, visible = true;
+  function frame(now) {
+    if (!running) return;
+    var dt = Math.min(0.05, (now - last) / 1000 || 0); last = now; time += dt;
+    for (var i = 0; i < agents.length; i++) {
+      agents[i].a += agents[i].w * dt;
+      if (agents[i].state !== "hold" && time - agents[i].flash > 2.6) { agents[i].state = "hold"; if (agents[i] === tracked) showState(); }
+    }
+    var tn = Math.floor(time / 1.5);
+    if (tn !== tickN) { tickN = tn; elTick.textContent = stamp(); }
+    if (time > nextEvent) {
+      var a = agents[Math.floor(rnd() * agents.length)];
+      if (a.state === "hold") act(a, rnd() < 0.58 ? "buy" : "sell");
+      nextEvent = time + 0.9 + rnd() * 1.3;
+    }
+    if (time > nextSignal) {
+      pulses.push(time);
+      log("sig", stamp() + " signal whale_sell " + TOKENS[Math.floor(rnd() * 3)] + " high, swarm exits");
+      var ringHit = Math.floor(rnd() * 3);
+      agents.forEach(function (g) { if (g.ring % 3 === ringHit) { g.state = "exit"; g.flash = time + 0.3 + g.ring * 0.25; } });
+      showState();
+      nextSignal = time + 13 + rnd() * 6;
+    }
+    while (pulses.length && time - pulses[0] > 2.4) pulses.shift();
+    if (time - trackedAt > 5 && time - userPick > 8) { tracked = agents[Math.floor(rnd() * agents.length)]; trackedAt = time; showTracked(); }
+    draw();
+    requestAnimationFrame(frame);
+  }
+  function setRunning(on) {
+    on = on && !reduce;
+    if (on && !running) { running = true; last = performance.now(); requestAnimationFrame(frame); }
+    else if (!on) running = false;
+  }
+
+  function pick(e) {
+    var r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top, best = null, bd = 30 * 30;
+    agents.forEach(function (a) { var d = (a.x - mx) * (a.x - mx) + (a.y - my) * (a.y - my); if (d < bd) { bd = d; best = a; } });
+    if (best && best !== tracked) { tracked = best; showTracked(); if (!running) draw(); }
+    if (best) { userPick = time; trackedAt = time; }
+  }
+  cv.addEventListener("pointermove", pick);
+  cv.addEventListener("pointerdown", pick);
+
+  // a settled first frame, then motion
+  act(agents[1], "buy", true); act(agents[9], "sell", true);
+  log("buy", "T+0000 fill momentum2 buy JUP 0.05 SOL");
+  log("sell", "T+0000 fill contrarian1 sell BONK 0.041 SOL");
+  log("", "T+0000 summary agents 14 mode paper");
+  showTracked();
+  if ("ResizeObserver" in window) new ResizeObserver(resize).observe(cv); else window.addEventListener("resize", resize);
+  resize();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
+  if ("IntersectionObserver" in window) new IntersectionObserver(function (es) { visible = es[0].isIntersecting; setRunning(visible && !document.hidden); }).observe(cv);
+  document.addEventListener("visibilitychange", function () { setRunning(visible && !document.hidden); });
+  setRunning(true);
+})();
+</script>
+</body>
+</html>
