@@ -11,8 +11,8 @@
 <meta property="og:type" content="website">
 <meta property="og:image" content="og.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="theme-color" content="#131209">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23131209'/%3E%3Cellipse cx='16' cy='16' rx='13' ry='6' transform='rotate(-20 16 16)' fill='none' stroke='%23F2EFE6' stroke-width='1.5'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23FF8A3D'/%3E%3Crect x='25' y='9' width='4' height='4' fill='%23BFE9EC'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000000'/%3E%3Cellipse cx='16' cy='16' rx='13' ry='6' transform='rotate(-20 16 16)' fill='none' stroke='%23EEF0F2' stroke-width='1.5'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23FF8A3D'/%3E%3Crect x='25' y='9' width='4' height='4' fill='%23BFE9EC'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
@@ -20,15 +20,15 @@
 /* Layout: a dark star chart. One live orbit diagram carries the page; everything else is quiet type on a ruled grid. */
 :root {
   color-scheme: dark;
-  --bg: #131209;
+  --bg: #000000;
   --surface: #181818;
   --surface-2: #1F1F1F;
-  --fg: #F2EFE6;
+  --fg: #EEF0F2;
   --muted: #9B9B9B;
-  --dim: #5E5C55;
-  --line: #313131;
+  --dim: #5B5F66;
+  --line: #2A2C30;
   --sun: #FF8A3D;
-  --sun-core: #FFF3DC;
+  --sun-core: #FFFFFF;
   --ice: #BFE9EC;
   --sans: "Geist", "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -55,7 +55,7 @@ p { text-wrap: pretty; }
 ::selection { background: var(--sun); color: var(--bg); }
 
 .grain {
-  position: fixed; inset: 0; z-index: 40; pointer-events: none; opacity: 0.11;
+  position: fixed; inset: 0; z-index: 40; pointer-events: none; opacity: 0.14;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 .skip {
@@ -111,8 +111,9 @@ p { text-wrap: pretty; }
 .btn.ghost:hover { border-color: var(--fg); background: transparent; }
 .btn.sm { font-size: 14px; line-height: 20px; border-radius: 9999px; }
 /* hero */
-.hero { padding-block: 128px 64px; }
-.hero-grid { display: grid; gap: 48px; align-items: center; }
+.hero { position: relative; overflow: hidden; padding-block: 112px 32px; border-bottom: 1px solid var(--line); }
+.hero .wrap { position: relative; }
+.hero-grid { display: grid; gap: 32px; align-items: center; }
 .hero-copy { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
 .hero h1 {
   max-width: 680px; font-size: 36px; line-height: 40px; letter-spacing: -0.03em;
@@ -124,8 +125,10 @@ p { text-wrap: pretty; }
 .cta-row .label { max-width: 240px; }
 @media (min-width: 640px) { .hero h1 { font-size: 48px; line-height: 1; } }
 @media (min-width: 1024px) {
-  .hero { padding-block: 160px 80px; }
-  .hero-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; }
+  .hero { padding-block: 112px 32px; }
+  .hero-grid { grid-template-columns: minmax(0, 540px) minmax(0, 1fr); gap: 48px; min-height: max(560px, calc(100vh - 146px)); }
+  .scope { align-self: stretch; }
+  .zone { flex: 1; }
   .hero h1 br { display: inline; }
 }
 
@@ -137,10 +140,11 @@ p { text-wrap: pretty; }
 }
 .scope-frame::before { left: -1px; top: -1px; border-right: 0; border-bottom: 0; }
 .scope-frame::after { right: -1px; bottom: -1px; border-left: 0; border-top: 0; }
-#swarm { display: block; width: 100%; aspect-ratio: 100 / 70; max-width: 100%; cursor: crosshair; touch-action: pan-y; }
+#swarm { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.zone { min-height: 300px; }
 .hud { display: grid; gap: 12px; }
 @media (min-width: 560px) { .hud { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
-.panel { border: 1px solid var(--line); background: var(--surface); padding: 12px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.panel { border: 1px solid var(--line); background: rgba(12, 12, 13, 0.78); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 12px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .panel-head { display: flex; justify-content: space-between; gap: 8px; }
 .readout-name { font-family: var(--mono); font-size: 14px; line-height: 20px; }
 .traits { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; align-items: center; }
@@ -183,8 +187,18 @@ p code, td code, li code { color: var(--fg); background: var(--surface-2); paddi
 .copy:active { transform: scale(0.98); }
 .run-grid { display: grid; gap: 48px; }
 @media (min-width: 900px) { .run-grid { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 64px; align-items: start; } }
+.plate { position: relative; margin-bottom: 48px; border: 1px solid var(--line); }
+.plate img { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; object-fit: cover; object-position: 50% 0; filter: contrast(1.05) brightness(0.9); }
+.plate figcaption { position: absolute; inset: 0; display: grid; grid-template-columns: 1fr 1fr; align-content: space-between; gap: 12px; padding: 12px; pointer-events: none; }
+.plate figcaption span { color: var(--fg); text-shadow: 0 0 8px var(--bg), 0 0 2px var(--bg); }
+.plate figcaption span:nth-child(even) { text-align: right; }
+.plate::before, .plate::after { content: ""; position: absolute; background: var(--fg); opacity: 0.28; pointer-events: none; }
+.plate::before { left: 0; right: 0; top: 62%; height: 1px; }
+.plate::after { top: 0; bottom: 0; left: 38%; width: 1px; }
+@media (min-width: 768px) { .plate img { aspect-ratio: 21 / 9; } .plate figcaption { padding: 16px; } }
 .caps { display: grid; gap: 24px; }
-.caps li { display: grid; gap: 4px; min-width: 0; }
+.caps li { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 4px 16px; align-items: start; min-width: 0; }
+.caps img { grid-row: span 2; width: 72px; height: 72px; object-fit: cover; display: block; border: 1px solid var(--line); filter: contrast(1.05) brightness(0.9); }
 .caps h3 { font-size: 18px; line-height: 28px; }
 .caps p { color: var(--muted); max-width: 440px; }
 .install { display: flex; flex-direction: column; gap: 16px; align-items: flex-start; min-width: 0; }
@@ -216,7 +230,7 @@ footer { padding-block: 48px 64px; border-top: 1px solid var(--line); }
 <header class="nav">
   <div class="island">
     <a class="brand" href="#top" aria-label="Helioswarm AI, back to top">
-      <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="16" rx="14" ry="6" transform="rotate(-20 16 16)" fill="none" stroke="#F2EFE6" stroke-width="1.5"/><circle cx="16" cy="16" r="4" fill="#FF8A3D"/><rect x="26" y="8" width="4" height="4" fill="#BFE9EC"/></svg>
+      <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="16" rx="14" ry="6" transform="rotate(-20 16 16)" fill="none" stroke="#EEF0F2" stroke-width="1.5"/><circle cx="16" cy="16" r="4" fill="#FF8A3D"/><rect x="26" y="8" width="4" height="4" fill="#BFE9EC"/></svg>
       Helioswarm
     </a>
     <a class="btn sm" href="#install">Install</a>
@@ -226,7 +240,8 @@ footer { padding-block: 48px 64px; border-top: 1px solid var(--line); }
 <main id="main">
 <div id="top"></div>
 
-<div class="hero">
+<div class="hero" id="hero">
+  <canvas id="swarm" role="img" aria-label="Fourteen agents drawn as small squares on six orbits around a dithered sun. Orbit distance shows paranoia, speed shows patience, direction shows contrarian, and wobble shows risk."></canvas>
   <div class="wrap">
     <div class="hero-grid">
       <div class="hero-copy">
@@ -244,7 +259,7 @@ footer { padding-block: 48px 64px; border-top: 1px solid var(--line); }
           <p class="label"><b>Heliocentric view</b> / shared board at origin</p>
           <p class="label" id="tick">T+0000</p>
         </div>
-        <div class="scope-frame"><canvas id="swarm" role="img" aria-label="Fourteen agents drawn as small squares on six orbits around a dithered sun. Orbit distance shows paranoia, speed shows patience, direction shows contrarian, and wobble shows risk."></canvas></div>
+        <div class="zone" id="zone"></div>
         <div class="scope-foot">
           <p class="label">Ring = paranoia / speed = patience / reverse = contrarian / wobble = risk</p>
           <p class="label">Simulated run. No live data.</p>
@@ -272,12 +287,19 @@ footer { padding-block: 48px 64px; border-top: 1px solid var(--line); }
       <p class="label rule"><b>Overview</b> / install</p>
       <h2>What it does and how to install it</h2>
     </div>
+    <figure class="plate rv">
+      <img src="img/lunar-terrain.jpg" width="2000" height="857" alt="Oblique black and white photograph of the cratered lunar surface running to a curved horizon under a black sky" loading="lazy">
+      <figcaption class="label" aria-hidden="true">
+        <span>Plate 01 / lunar terrain</span><span>NASA archive photograph</span>
+        <span>Oblique view from orbit</span><span>Luna / 384,400 km</span>
+      </figcaption>
+    </figure>
     <div class="run-grid rv">
       <ul class="caps">
-        <li><h3>Trades with personality</h3><p>Six presets, from degen to sniper, deployed as many times as you like. Every agent trades from its own wallet.</p></li>
-        <li><h3>Moves as one swarm</h3><p>Agents share one board, so they spread out, exit together on a whale sale and never buy from each other.</p></li>
-        <li><h3>Watches and reports</h3><p>Groups can also send price alerts to a webhook and log equity and profit or loss.</p></li>
-        <li><h3>Stays on paper until you say so</h3><p>Real swaps need a live config and <code>SWARM_LIVE=1</code>, and they run under spend and rate caps.</p></li>
+        <li><img src="img/bootprint.jpg" width="320" height="320" alt="Apollo 11 bootprint in lunar soil, July 1969" loading="lazy"><h3>Trades with personality</h3><p>Six presets, from degen to sniper, deployed as many times as you like. Every agent trades from its own wallet.</p></li>
+        <li><img src="img/bright-halo-craters.jpg" width="320" height="320" alt="Lunar surface scattered with bright halo craters" loading="lazy"><h3>Moves as one swarm</h3><p>Agents share one board, so they spread out, exit together on a whale sale and never buy from each other.</p></li>
+        <li><img src="img/southern-sea.jpg" width="320" height="320" alt="Lunar maria seen from orbit" loading="lazy"><h3>Watches and reports</h3><p>Groups can also send price alerts to a webhook and log equity and profit or loss.</p></li>
+        <li><img src="img/lunar-crater.jpg" width="320" height="320" alt="Lunar crater in deep shadow" loading="lazy"><h3>Stays on paper until you say so</h3><p>Real swaps need a live config and <code>SWARM_LIVE=1</code>, and they run under spend and rate caps.</p></li>
       </ul>
       <div class="install">
         <div class="term">
@@ -302,7 +324,7 @@ pnpm start -- --config swarm.json --ticks 50</pre>
 
 <footer>
   <div class="wrap foot">
-    <p>Helioswarm is open software, not financial advice. Trading tokens can lose everything you put in.</p>
+    <p>Helioswarm is open software, not financial advice. Trading tokens can lose everything you put in. Lunar photographs courtesy of NASA, which does not endorse this project.</p>
     <nav aria-label="Footer">
       <a href="https://github.com/helioswarmai/helioswarm" rel="noopener">GitHub</a>
       <a href="#top">Back to top</a>
@@ -364,7 +386,8 @@ pnpm start -- --config swarm.json --ticks 50</pre>
   var C = { fg: tok("--fg"), muted: tok("--muted"), dim: tok("--dim"), line: tok("--line"), sun: tok("--sun"), core: tok("--sun-core"), ice: tok("--ice"), bg: tok("--bg") };
   var BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
   var ROT = -0.32, SQ = 0.46, TOKENS = ["BONK", "WIF", "JUP"];
-  var W = 0, H = 0, cx = 0, cy = 0, dpr = 1;
+  var W = 0, H = 0, U = 0, cx = 0, cy = 0, dpr = 1;
+  var hero = document.getElementById("hero"), zone = document.getElementById("zone");
 
   // seeded so every visit draws the same sky
   var seed = 7;
@@ -383,14 +406,14 @@ pnpm start -- --config swarm.json --ticks 50</pre>
     }
   });
   var stars = [];
-  for (var s = 0; s < 70; s++) stars.push([rnd(), rnd(), rnd()]);
+  for (var s = 0; s < 180; s++) stars.push([rnd(), rnd(), rnd()]);
 
   var tracked = agents[agents.length - 2], trackedAt = 0, userPick = -99;
   var pulses = [], time = 0, tickN = 0, nextEvent = 1.2, nextSignal = 9, feed = [];
   var elTick = document.getElementById("tick"), elName = document.getElementById("r-name"),
       elState = document.getElementById("r-state"), elTraits = document.getElementById("r-traits"), elFeed = document.getElementById("feed");
 
-  function ringRx(i) { var inner = W * 0.17, outer = W * 0.46; return inner + (outer - inner) * i / (PRESETS.length - 1); }
+  function ringRx(i) { var inner = U * 0.17, outer = U * 0.46; return inner + (outer - inner) * i / (PRESETS.length - 1); }
   function place(a) {
     var rx = ringRx(a.ring) * (1 + a.amp * Math.sin(a.a * 3 + a.ph + time * 0.7)), ry = rx * SQ;
     var px = rx * Math.cos(a.a), py = ry * Math.sin(a.a);
@@ -421,13 +444,16 @@ pnpm start -- --config swarm.json --ticks 50</pre>
   function resize() {
     var r = cv.getBoundingClientRect();
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    W = r.width; H = r.height; cx = W * 0.5; cy = H * 0.5;
+    var z = zone.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cx = z.left - r.left + z.width / 2; cy = z.top - r.top + z.height / 2;
+    U = Math.min(z.width * 0.52, z.height * 0.93) * (W >= 1024 ? 1.3 : 1) / 0.46;
     cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
     draw();
   }
 
   function drawSun() {
-    var cell = Math.max(3, Math.round(W / 170)), R = W * 0.036, ext = W * 0.17, n = Math.ceil(ext / cell);
+    var cell = Math.max(3, Math.round(U / 250)), R = U * 0.036, ext = U * 0.19, n = Math.ceil(ext / cell);
     for (var gy = -n; gy <= n; gy++) for (var gx = -n; gx <= n; gx++) {
       var x = gx * cell, y = gy * cell, d = Math.sqrt(x * x + y * y);
       if (d > ext) continue;
@@ -442,7 +468,7 @@ pnpm start -- --config swarm.json --ticks 50</pre>
     if (!W) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    var i, a, g = W / 12;
+    var i, a, g = 48;
 
     // chart grid and axes
     ctx.lineWidth = 1; ctx.strokeStyle = C.line; ctx.globalAlpha = 0.55; ctx.beginPath();
@@ -472,14 +498,14 @@ pnpm start -- --config swarm.json --ticks 50</pre>
 
     // signal pulses
     for (i = 0; i < pulses.length; i++) {
-      var age = time - pulses[i], pr = W * 0.5 * age / 2.4;
+      var age = time - pulses[i], pr = U * 0.6 * age / 2.4;
       ctx.strokeStyle = C.sun; ctx.globalAlpha = Math.max(0, 1 - age / 2.4);
       ctx.beginPath(); ctx.ellipse(cx, cy, pr, pr * SQ, ROT, 0, Math.PI * 2); ctx.stroke();
     }
     ctx.globalAlpha = 1;
 
     // agents
-    var size = Math.max(5, Math.round(W / 90));
+    var size = Math.max(5, Math.round(U / 90));
     for (i = 0; i < agents.length; i++) {
       a = agents[i]; place(a);
       var f = time - a.flash, col = a.state === "buy" ? C.ice : a.state === "hold" ? C.fg : C.sun;
@@ -501,7 +527,7 @@ pnpm start -- --config swarm.json --ticks 50</pre>
       ctx.moveTo(bx + k[0] * q, by + k[1] * (q - c4)); ctx.lineTo(bx + k[0] * q, by + k[1] * q); ctx.lineTo(bx + k[0] * (q - c4), by + k[1] * q);
     });
     ctx.stroke();
-    var right = a.x < W * 0.62, tx = bx + (right ? q + 28 : -q - 28), up = a.y > H * 0.2 ? -1 : 1, ty = by + up * (q + 14);
+    var right = a.x < cx + U * 0.1, tx = bx + (right ? q + 28 : -q - 28), up = a.y > H * 0.2 ? -1 : 1, ty = by + up * (q + 14);
     ctx.strokeStyle = C.muted; ctx.beginPath(); ctx.moveTo(bx + (right ? q : -q), by + up * q); ctx.lineTo(tx - (right ? 6 : -6), ty); ctx.stroke();
     ctx.textAlign = right ? "left" : "right"; ctx.fillStyle = C.fg;
     ctx.fillText(a.name.toUpperCase().replace(" ", " 0"), tx, ty);
@@ -549,8 +575,8 @@ pnpm start -- --config swarm.json --ticks 50</pre>
     if (best && best !== tracked) { tracked = best; showTracked(); if (!running) draw(); }
     if (best) { userPick = time; trackedAt = time; }
   }
-  cv.addEventListener("pointermove", pick);
-  cv.addEventListener("pointerdown", pick);
+  hero.addEventListener("pointermove", pick);
+  hero.addEventListener("pointerdown", pick);
 
   // a settled first frame, then motion
   act(agents[1], "buy", true); act(agents[9], "sell", true);
@@ -558,7 +584,7 @@ pnpm start -- --config swarm.json --ticks 50</pre>
   log("sell", "T+0000 fill contrarian1 sell BONK 0.041 SOL");
   log("", "T+0000 summary agents 14 mode paper");
   showTracked();
-  if ("ResizeObserver" in window) new ResizeObserver(resize).observe(cv); else window.addEventListener("resize", resize);
+  if ("ResizeObserver" in window) new ResizeObserver(resize).observe(hero); else window.addEventListener("resize", resize);
   resize();
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
   if ("IntersectionObserver" in window) new IntersectionObserver(function (es) { visible = es[0].isIntersecting; setRunning(visible && !document.hidden); }).observe(cv);
