@@ -10,9 +10,10 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "start": "tsx src/main.ts",
+    "start": "tsx --env-file-if-exists=.env src/main.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "watch": "tsx --env-file-if-exists=.env src/main.ts --config swarm.json --watch"
   },
   "dependencies": {
     "@solana/kit": "8.4.0",
