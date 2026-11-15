@@ -29,6 +29,8 @@
   --sun: #FF8A3D;
   --sun-core: #FFFFFF;
   --ice: #BFE9EC;
+  --grid: rgba(255, 255, 255, 0.05);
+  --g: 96px; --padl: 16px; --padr: 16px; --top: 96px;
   --sans: "Geist", "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
@@ -36,7 +38,10 @@
 *, *::before, *::after { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body {
-  margin: 0; background: var(--bg); color: var(--fg);
+  margin: 0; color: var(--fg);
+  background-color: var(--bg);
+  background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+  background-size: var(--g) var(--g); background-position: var(--padl) var(--top);
   font-family: var(--sans); font-size: 16px; line-height: 24px;
   -webkit-font-smoothing: antialiased; overflow-x: hidden;
 }
@@ -60,12 +65,8 @@ p { text-wrap: pretty; }
 .skip:focus { top: calc(env(safe-area-inset-top, 0px) + 16px); }
 
 .wrap {
-  max-width: 1232px; margin-inline: auto;
-  padding-left: max(16px, env(safe-area-inset-left, 0px));
-  padding-right: max(16px, env(safe-area-inset-right, 0px));
-}
-@media (min-width: 768px) {
-  .wrap { padding-left: max(32px, env(safe-area-inset-left, 0px)); padding-right: max(32px, env(safe-area-inset-right, 0px)); }
+  padding-left: max(var(--padl), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--padr), env(safe-area-inset-right, 0px));
 }
 
 .label {
@@ -89,21 +90,12 @@ p { text-wrap: pretty; }
   background: rgba(12, 12, 13, 0.72); border: 1px solid var(--line);
   -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
 }
-.brand { display: flex; align-items: center; gap: 8px; text-decoration: none; font-weight: 600; font-size: 14px; line-height: 20px; }
+.brand { display: flex; align-items: center; gap: 8px; text-decoration: none; font-family: var(--mono); font-weight: 500; font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; }
 .brand svg { display: block; }
-.status {
-  display: none; align-items: center; gap: 8px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 9999px;
-  font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--muted); white-space: nowrap;
-  transition: color 700ms var(--ease), border-color 700ms var(--ease);
-}
-.status::before { content: ""; width: 6px; height: 6px; background: var(--ice); transition: background-color 700ms var(--ease); }
-.status.alert { color: var(--sun); border-color: var(--sun); }
-.status.alert::before { background: var(--sun); }
-@media (min-width: 640px) { .status { display: inline-flex; } }
 .btn {
   display: inline-flex; align-items: center; gap: 8px;
-  font-family: var(--sans); font-size: 16px; line-height: 24px; font-weight: 600;
-  padding: 8px 12px; border-radius: 2px; border: 1px solid var(--fg);
+  font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 8px 12px; border-radius: 0; border: 1px solid var(--fg);
   background: var(--fg); color: var(--bg); text-decoration: none; cursor: pointer;
   transition: background-color 700ms var(--ease), color 700ms var(--ease), border-color 700ms var(--ease), transform 300ms var(--ease);
 }
@@ -111,7 +103,9 @@ p { text-wrap: pretty; }
 .btn:active { transform: scale(0.98); }
 .btn.ghost { background: rgba(0, 0, 0, 0.6); color: var(--fg); border-color: var(--line); }
 .btn.ghost:hover { border-color: var(--fg); background: rgba(0, 0, 0, 0.6); }
-.btn.sm { font-size: 14px; line-height: 20px; border-radius: 9999px; }
+.btn { gap: 0; }
+.btn::before { content: "[ "; white-space: pre; } .btn::after { content: " ]"; white-space: pre; }
+.btn.sm { border-radius: 9999px; }
 
 /* hero: the whole viewport is the swarm; type sits in the corners */
 .hero { position: relative; overflow: hidden; min-height: 100vh; min-height: 100svh; display: flex; border-bottom: 1px solid var(--line); }
@@ -119,49 +113,37 @@ p { text-wrap: pretty; }
 #swarm.dragging { cursor: grabbing; }
 .overlay {
   position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto 1fr auto; gap: 24px;
-  padding: 96px max(16px, env(safe-area-inset-right, 0px)) 24px max(16px, env(safe-area-inset-left, 0px));
+  padding: var(--top) max(var(--padr), env(safe-area-inset-right, 0px)) 40px max(var(--padl), env(safe-area-inset-left, 0px));
   pointer-events: none;
 }
 .overlay a { pointer-events: auto; }
-.overlay::before, .overlay::after, .hero::before, .hero::after {
-  content: "+"; position: absolute; font-family: var(--mono); font-size: 16px; line-height: 16px; color: var(--dim); pointer-events: none;
-}
-.hero::before { left: 12px; top: 72px; } .hero::after { right: 12px; top: 72px; }
-.overlay::before { left: 12px; bottom: 8px; } .overlay::after { right: 12px; bottom: 8px; }
-.meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; align-self: start; }
-.meta dt, .meta dd { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.04em; }
-.meta dt { color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; }
-.meta dd { color: var(--fg); }
-.clock { text-align: right; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-.clock strong { font-family: var(--mono); font-weight: 500; font-size: 14px; line-height: 20px; font-variant-numeric: tabular-nums; }
-.legend { display: none; gap: 16px; }
-.legend li { display: flex; align-items: center; gap: 8px; }
-.legend i { width: 7px; height: 7px; border: 1px solid var(--fg); }
-.legend .b i { background: var(--ice); border-color: var(--ice); }
-.legend .s i { background: var(--sun); border-color: var(--sun); }
-.hero-copy { grid-row: 3; grid-column: 1 / -1; display: flex; flex-direction: column; gap: 24px; min-width: 0; align-items: flex-start; }
-.hero h1 { font-size: 48px; line-height: 1; letter-spacing: -0.04em; font-weight: 600; color: var(--fg); }
+.meta { align-self: start; margin: 0; padding-top: 8px; font-family: var(--mono); font-size: 12px; line-height: 20px; letter-spacing: 0.04em; color: var(--dim); white-space: pre; }
+.meta b { font-weight: 400; color: var(--fg); }
+.meta .alert { color: var(--sun); }
+.clock { padding-top: 8px; text-align: right; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; font-family: var(--mono); font-size: 12px; line-height: 20px; letter-spacing: 0.04em; }
+.clock strong { font-weight: 400; color: var(--fg); font-variant-numeric: tabular-nums; }
+.legend { display: none; gap: 16px; color: var(--muted); white-space: pre; }
+.hero-copy { grid-row: 3; grid-column: 1 / -1; display: flex; flex-direction: column; gap: 16px; min-width: 0; align-items: flex-start; }
+.hero h1 { font-size: 30px; line-height: 36px; letter-spacing: -0.01em; font-weight: 500; text-transform: uppercase; color: var(--fg); }
 .hero h1 span { display: block; color: var(--muted); }
-.hero .sub { max-width: 440px; color: var(--muted); }
-.hero .sub strong { color: var(--fg); font-weight: 500; }
-.cta-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.brief { display: grid; gap: 4px; font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.brief li { padding-left: 2ch; text-indent: -2ch; }
+.brief li::before { content: "> "; white-space: pre; color: var(--sun); }
+.cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
 .hint { display: none; grid-row: 3; grid-column: 2; align-self: end; text-align: right; }
 @media (min-width: 768px) {
-  .overlay { padding: 96px max(40px, env(safe-area-inset-right, 0px)) 40px max(40px, env(safe-area-inset-left, 0px)); }
-  .hero::before { left: 20px; } .hero::after { right: 20px; }
-  .overlay::before { left: 20px; bottom: 16px; } .overlay::after { right: 20px; bottom: 16px; }
-  .legend { display: flex; }
-  .hero h1 { font-size: 72px; }
+  .legend { display: block; }
+  .hero h1 { font-size: 36px; line-height: 40px; }
 }
 @media (min-width: 1024px) {
   .hero-copy { grid-column: 1; }
   .hint { display: block; }
-  .hero h1 { font-size: 96px; }
+  .hero h1 { font-size: 48px; line-height: 1; }
 }
 
 /* card that follows an agent */
 .callout {
-  position: absolute; left: 0; top: 0; width: 248px; z-index: 2; pointer-events: none;
+  position: absolute; left: 0; top: 0; width: 232px; z-index: 2; pointer-events: none;
   border: 1px solid var(--muted); background: rgba(0, 0, 0, 0.86); padding: 12px;
   display: flex; flex-direction: column; gap: 8px;
   opacity: 0; transition: opacity 300ms var(--ease), border-color 700ms var(--ease);
@@ -170,8 +152,8 @@ p { text-wrap: pretty; }
 .callout.alert { border-color: var(--sun); }
 .callout.ok { border-color: var(--ice); }
 .callout-head { display: flex; justify-content: space-between; gap: 8px; }
-.callout-title { font-family: var(--mono); font-size: 14px; line-height: 20px; color: var(--fg); }
-.callout-sub { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--muted); }
+.callout-title { font-family: var(--mono); font-size: 14px; line-height: 20px; color: var(--fg); text-transform: uppercase; letter-spacing: 0.04em; }
+.callout-sub { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 .traits { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; align-items: center; }
 .traits dt, .traits dd { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; }
 .traits dt { color: var(--muted); }
@@ -182,25 +164,26 @@ p { text-wrap: pretty; }
 .bar.hot i.on { background: var(--sun); }
 
 /* second section */
-section { padding-block: 64px; }
-@media (min-width: 900px) { section { padding-block: 96px; } }
-h2 { font-size: 30px; line-height: 36px; letter-spacing: -0.02em; font-weight: 500; margin: 0 0 32px; }
-@media (min-width: 900px) { h2 { font-size: 36px; line-height: 40px; } }
-.plate { position: relative; margin: 0 0 48px; border: 1px solid var(--line); }
-.plate img { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; object-fit: cover; object-position: 50% 0; filter: contrast(1.05) brightness(0.9); }
+section { padding-block: calc(var(--g) - 40px) var(--g); }
+h2 { display: flex; align-items: center; gap: 12px; margin: 0 0 24px; font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg); }
+h2::before { content: "//"; color: var(--sun); }
+h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.plate { position: relative; margin: 0 0 var(--g); }
+.plate img { display: block; width: 100%; height: calc(var(--g) * 3); object-fit: cover; object-position: 50% 0; filter: contrast(1.05) brightness(0.9); }
 .plate figcaption { position: absolute; left: 12px; top: 12px; color: var(--fg); }
-@media (min-width: 768px) { .plate img { aspect-ratio: 21 / 9; } .plate figcaption { left: 16px; top: 16px; } }
-.run-grid { display: grid; gap: 48px; }
-@media (min-width: 900px) { .run-grid { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 64px; align-items: start; } }
-.caps { display: grid; gap: 24px; margin: 0; padding: 0; list-style: none; }
-.caps li { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 4px 16px; align-items: start; min-width: 0; }
-.caps img { grid-row: span 2; width: 72px; height: 72px; object-fit: cover; display: block; border: 1px solid var(--line); filter: contrast(1.05) brightness(0.9); }
-.caps h3 { font-size: 18px; line-height: 28px; font-weight: 500; }
-.caps p { color: var(--muted); max-width: 440px; }
+@media (min-width: 768px) { .plate img { height: calc(var(--g) * 4); } .plate figcaption { left: 16px; top: 16px; } }
+.run-grid { display: grid; gap: var(--g) 0; }
+@media (min-width: 900px) { .run-grid { grid-template-columns: calc(var(--g) * var(--half, 6)) minmax(0, 1fr); align-items: start; } .run-grid > :first-child { padding-right: 40px; } }
+.caps { display: grid; gap: 16px; margin: 0; padding: 0; list-style: none; counter-reset: cap; }
+.caps li { counter-increment: cap; display: grid; grid-template-columns: 4ch minmax(0, 1fr); gap: 4px 8px; min-width: 0; }
+.caps li::before { content: "0" counter(cap); grid-row: span 2; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--sun); }
+.caps h3 { font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; }
+.caps p { color: var(--muted); font-size: 14px; line-height: 20px; max-width: 440px; }
 .install { display: flex; flex-direction: column; gap: 16px; align-items: flex-start; min-width: 0; }
 .term { width: 100%; border: 1px solid var(--line); background: var(--surface); min-width: 0; }
 .term-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--line); }
-.term pre { margin: 0; padding: 16px; overflow-x: auto; font-family: var(--mono); font-size: 14px; line-height: 24px; color: var(--fg); }
+.term pre { margin: 0; padding: 16px; overflow-x: auto; font-family: var(--mono); font-size: 12px; line-height: 24px; color: var(--fg); }
+.term pre span::before { content: "$ "; color: var(--sun); }
 .copy {
   font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase;
   padding: 8px 12px; background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 2px; cursor: pointer;
@@ -209,10 +192,10 @@ h2 { font-size: 30px; line-height: 36px; letter-spacing: -0.02em; font-weight: 5
 .copy:hover { border-color: var(--fg); }
 .copy:active { transform: scale(0.98); }
 
-footer { padding-block: 32px 48px; border-top: 1px solid var(--line); }
+footer { padding-block: 40px; border-top: 1px solid var(--line); }
 .foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 24px; }
 .foot nav { display: flex; gap: 24px; flex-wrap: wrap; }
-.foot nav a { font-size: 14px; line-height: 20px; color: var(--muted); text-decoration: none; transition: color 700ms var(--ease); }
+.foot nav a { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); text-decoration: none; transition: color 700ms var(--ease); }
 .foot nav a:hover { color: var(--fg); }
 
 .js .rv { opacity: 0; transform: translateY(64px); filter: blur(12px); transition: opacity 900ms var(--ease), transform 900ms var(--ease), filter 900ms var(--ease); }
@@ -234,7 +217,6 @@ footer { padding-block: 32px 48px; border-top: 1px solid var(--line); }
       <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="16" rx="14" ry="6" transform="rotate(-20 16 16)" fill="none" stroke="#EEF0F2" stroke-width="1.5"/><circle cx="16" cy="16" r="4" fill="#FF8A3D"/><rect x="26" y="8" width="4" height="4" fill="#BFE9EC"/></svg>
       Helioswarm
     </a>
-    <span class="status" id="status" aria-hidden="true">48 agents in orbit</span>
     <a class="btn sm" href="#install">Install</a>
   </div>
 </header>
@@ -244,53 +226,55 @@ footer { padding-block: 32px 48px; border-top: 1px solid var(--line); }
   <canvas id="swarm" role="img" aria-label="Forty eight trading agents drawn as small squares orbiting a dithered sun. Hover an agent to read its personality, and drag to rotate the view."></canvas>
   <div class="callout" id="callout" aria-hidden="true"></div>
   <div class="overlay">
-    <dl class="meta">
-      <dt>Swarm</dt><dd>helios 01</dd>
-      <dt>Agents</dt><dd>48 / 6 presets</dd>
-      <dt>Targets</dt><dd>BONK / WIF / JUP</dd>
-    </dl>
+    <pre class="meta">SWARM ....... <b>HELIOS-01</b>
+UNITS ....... <b>48 / 6 CLASSES</b>
+TARGETS ..... <b>BONK WIF JUP</b>
+STATUS ...... <b id="status">NOMINAL</b></pre>
     <div class="clock">
       <strong id="tick">T+0000</strong>
-      <ul class="legend label" aria-hidden="true">
-        <li><i></i>hold</li><li class="b"><i></i>buy</li><li class="s"><i></i>sell</li>
-      </ul>
+      <span class="legend" aria-hidden="true">[ ] HOLD   <span class="ice">[+] BUY</span>   <span class="sun">[-] SELL</span></span>
     </div>
     <div class="hero-copy">
-      <p class="label"><b>Helioswarm AI</b> / autonomous trading agents / Solana</p>
+      <p class="label"><span class="sun">///</span> <b>Helioswarm AI</b> :: rev 0.1</p>
       <h1>Many minds.<span>One swarm.</span></h1>
-      <p class="sub"><strong>Helioswarm puts a swarm of AI agents on Solana tokens.</strong> Each one trades with its own personality and its own wallet, and all of them move on one shared board.</p>
+      <ul class="brief">
+        <li>Autonomous trading agents for Solana tokens</li>
+        <li>Every unit: own mind, own wallet, one shared board</li>
+      </ul>
       <div class="cta-row">
         <a class="btn" href="#install">Install</a>
-        <a class="btn ghost" href="https://github.com/helioswarmai/helioswarm" rel="noopener">View on GitHub</a>
+        <a class="btn ghost" href="https://github.com/helioswarmai/helioswarm" rel="noopener">GitHub</a>
       </div>
     </div>
-    <p class="hint label" aria-hidden="true">Hover an agent / drag to rotate</p>
+    <p class="hint label" aria-hidden="true">:: Hover unit // drag to rotate ::</p>
   </div>
 </div>
 
 <section id="install">
   <div class="wrap">
-    <h2 class="rv">What it does</h2>
     <figure class="plate rv">
       <img src="img/lunar-terrain.jpg" width="2000" height="857" alt="Black and white photograph of the cratered lunar surface running to a curved horizon" loading="lazy">
-      <figcaption class="label">Lunar surface / NASA</figcaption>
+      <figcaption class="label">Plate 01 // lunar surface // NASA</figcaption>
     </figure>
     <div class="run-grid rv">
-      <ul class="caps">
-        <li><img src="img/bootprint.jpg" width="320" height="320" alt="Apollo 11 bootprint in lunar soil" loading="lazy"><h3>Trades with personality</h3><p>Six presets, from degen to sniper, deployed as many times as you like.</p></li>
-        <li><img src="img/bright-halo-craters.jpg" width="320" height="320" alt="Lunar surface scattered with bright halo craters" loading="lazy"><h3>Moves as one swarm</h3><p>Agents share one board, so they spread out, exit together and never buy from each other.</p></li>
-        <li><img src="img/southern-sea.jpg" width="320" height="320" alt="Lunar maria seen from orbit" loading="lazy"><h3>Reads the chain as it lands</h3><p>A live stream flags whale sales and holder moves, and the swarm reacts between ticks.</p></li>
-        <li><img src="img/lunar-crater.jpg" width="320" height="320" alt="Lunar crater in deep shadow" loading="lazy"><h3>Watches and reports</h3><p>Price alerts to a webhook, plus equity and profit for every agent.</p></li>
-      </ul>
+      <div>
+        <h2>Capabilities</h2>
+        <ul class="caps">
+          <li><h3>Personality classes</h3><p>Six presets, degen to sniper. Deploy any count.</p></li>
+          <li><h3>Swarm coordination</h3><p>One board. Units spread out and exit together.</p></li>
+          <li><h3>Chain telemetry</h3><p>Whale sales and holder moves, flagged as they land.</p></li>
+          <li><h3>Alerts + reports</h3><p>Webhook price alerts. Equity and profit per unit.</p></li>
+        </ul>
+      </div>
       <div class="install">
+        <h2 style="width:100%">Install</h2>
         <div class="term">
-          <div class="term-head"><span class="label">Install</span><button class="copy" id="copy" type="button">Copy</button></div>
-<pre id="cmd">git clone https://github.com/helioswarmai/helioswarm
-cd helioswarm &amp;&amp; pnpm install
-cp swarm.example.json swarm.json
-pnpm start -- --config swarm.json</pre>
+          <div class="term-head"><span class="label">helioswarm :: sh</span><button class="copy" id="copy" type="button">[ Copy ]</button></div>
+<pre id="cmd"><span>git clone https://github.com/helioswarmai/helioswarm</span>
+<span>cd helioswarm &amp;&amp; pnpm install</span>
+<span>cp swarm.example.json swarm.json</span>
+<span>pnpm start -- --config swarm.json</span></pre>
         </div>
-        <a class="btn ghost" href="https://github.com/helioswarmai/helioswarm" rel="noopener">View on GitHub</a>
       </div>
     </div>
   </div>
@@ -299,10 +283,10 @@ pnpm start -- --config swarm.json</pre>
 
 <footer>
   <div class="wrap foot">
-    <p class="label">Helioswarm AI</p>
+    <p class="label"><span class="sun">///</span> Helioswarm AI :: end of transmission</p>
     <nav aria-label="Footer">
       <a href="https://github.com/helioswarmai/helioswarm" rel="noopener">GitHub</a>
-      <a href="#top">Back to top</a>
+      <a href="#top">Top</a>
     </nav>
   </div>
 </footer>
@@ -315,12 +299,12 @@ pnpm start -- --config swarm.json</pre>
 
   // Trait values come from the presets in src/types.ts. n is how many of each fly in the hero.
   var PRESETS = [
-    { id: "degen", name: "Degen", n: 6, t: { risk: 235, patience: 40, contrarian: 70, paranoia: 40 } },
-    { id: "showman", name: "Showman", n: 5, t: { risk: 140, patience: 110, contrarian: 80, paranoia: 50 } },
-    { id: "holder", name: "Holder", n: 7, t: { risk: 70, patience: 230, contrarian: 110, paranoia: 60 } },
-    { id: "contrarian", name: "Contrarian", n: 8, t: { risk: 150, patience: 160, contrarian: 235, paranoia: 100 } },
-    { id: "momentum", name: "Momentum", n: 10, t: { risk: 170, patience: 90, contrarian: 30, paranoia: 130 } },
-    { id: "sniper", name: "Sniper", n: 12, t: { risk: 190, patience: 25, contrarian: 90, paranoia: 200 } }
+    { id: "degen", code: "DGN", name: "Degen", n: 6, t: { risk: 235, patience: 40, contrarian: 70, paranoia: 40 } },
+    { id: "showman", code: "SHW", name: "Showman", n: 5, t: { risk: 140, patience: 110, contrarian: 80, paranoia: 50 } },
+    { id: "holder", code: "HLD", name: "Holder", n: 7, t: { risk: 70, patience: 230, contrarian: 110, paranoia: 60 } },
+    { id: "contrarian", code: "CTR", name: "Contrarian", n: 8, t: { risk: 150, patience: 160, contrarian: 235, paranoia: 100 } },
+    { id: "momentum", code: "MOM", name: "Momentum", n: 10, t: { risk: 170, patience: 90, contrarian: 30, paranoia: 130 } },
+    { id: "sniper", code: "SNP", name: "Sniper", n: 12, t: { risk: 190, patience: 25, contrarian: 90, paranoia: 200 } }
   ];
   var TRAITS = ["risk", "patience", "contrarian", "paranoia"], TOKENS = ["BONK", "WIF", "JUP"];
 
@@ -348,7 +332,7 @@ pnpm start -- --config swarm.json</pre>
   // copy the commands
   var copyBtn = document.getElementById("copy"), cmd = document.getElementById("cmd");
   copyBtn.addEventListener("click", function () {
-    function done(ok) { copyBtn.textContent = ok ? "Copied" : "Selected"; setTimeout(function () { copyBtn.textContent = "Copy"; }, 1800); }
+    function done(ok) { copyBtn.textContent = ok ? "[ Copied ]" : "[ Selected ]"; setTimeout(function () { copyBtn.textContent = "[ Copy ]"; }, 1800); }
     function select() { var r = document.createRange(); r.selectNodeContents(cmd); var s = getSelection(); s.removeAllRanges(); s.addRange(r); done(false); }
     try { navigator.clipboard.writeText(cmd.textContent).then(function () { done(true); }, select); } catch (err) { select(); }
   });
@@ -362,6 +346,7 @@ pnpm start -- --config swarm.json</pre>
   var MONO = tok("--mono");
   var BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
   var rot = -0.32, sq = 0.46, W = 0, H = 0, U = 0, cx = 0, cy = 0, dpr = 1;
+  var G = 96, padL = 16, TOP = 96, lastW = 0, root = document.documentElement;
 
   var seed = 11;
   function rnd() { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; }
@@ -370,7 +355,7 @@ pnpm start -- --config swarm.json</pre>
   PRESETS.forEach(function (p, ring) {
     for (var k = 0; k < p.n; k++) {
       agents.push({
-        name: p.id + " " + ("0" + (k + 1)).slice(-2), preset: p, ring: ring, token: TOKENS[ring % 3],
+        name: p.code + "-" + ("0" + (k + 1)).slice(-2), preset: p, ring: ring, token: TOKENS[ring % 3],
         a: (k / p.n) * Math.PI * 2 + rnd() * 0.5,
         w: (0.04 + (1 - p.t.patience / 255) * 0.22) * (p.t.contrarian > 128 ? -1 : 1) * (0.85 + rnd() * 0.3),
         amp: p.t.risk / 255 * 0.07, ph: rnd() * 6.28,
@@ -394,12 +379,27 @@ pnpm start -- --config swarm.json</pre>
   function stateColor(a) { return a.state === "buy" ? C.ice : a.state === "hold" ? C.fg : C.sun; }
   function stamp() { return "T+" + ("000" + tickN).slice(-4); }
 
+  // one square grid for the whole page: cells of about 96px, sized so the side margins match
+  function layout() {
+    var vw = root.clientWidth, pad = vw >= 768 ? 40 : 16, n = Math.max(3, Math.round((vw - pad * 2) / 96));
+    G = Math.floor((vw - pad * 2) / n); padL = Math.floor((vw - n * G) / 2);
+    var rows = Math.max(vw >= 768 ? 5 : 7, Math.round((window.innerHeight - TOP - 40) / G));
+    root.style.setProperty("--g", G + "px");
+    root.style.setProperty("--padl", padL + "px");
+    root.style.setProperty("--padr", (vw - n * G - padL) + "px");
+    root.style.setProperty("--half", Math.floor(n / 2));
+    hero.style.minHeight = (TOP + rows * G + 40) + "px";
+    lastW = vw;
+  }
+  function snapX(x) { return padL + Math.round((x - padL) / G) * G; }
+  function snapY(y) { return TOP + Math.round((y - TOP) / G) * G; }
   function resize() {
+    if (root.clientWidth !== lastW) layout();
     var r = hero.getBoundingClientRect(), wide = r.width >= 1024;
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     W = r.width; H = r.height;
-    cx = W * (wide ? 0.62 : 0.5); cy = H * (wide ? 0.45 : 0.33);
-    U = (wide ? Math.min(W * 0.36, H * 0.8) : Math.min(W * 0.7, H * 0.42)) / 0.46;
+    cx = snapX(W * (wide ? 0.62 : 0.5)); cy = snapY(H * (wide ? 0.44 : 0.38));
+    U = (wide ? Math.min(W * 0.36, H * 0.8) : Math.min(W * 0.7, H * 0.4)) / 0.46;
     cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
     draw();
   }
@@ -421,11 +421,13 @@ pnpm start -- --config swarm.json</pre>
     if (!W) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    var i, a, g = 48;
+    var i, a;
 
-    ctx.lineWidth = 1; ctx.strokeStyle = C.line; ctx.globalAlpha = 0.5; ctx.beginPath();
-    for (var x = cx % g; x < W; x += g) { ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, H); }
-    for (var y = cy % g; y < H; y += g) { ctx.moveTo(0, Math.round(y) + 0.5); ctx.lineTo(W, Math.round(y) + 0.5); }
+    // registration marks where the page grid crosses
+    ctx.lineWidth = 1; ctx.strokeStyle = C.muted; ctx.globalAlpha = 0.4; ctx.beginPath();
+    for (var x = padL; x <= W; x += G) for (var y = TOP; y <= H; y += G) {
+      ctx.moveTo(x - 3, y + 0.5); ctx.lineTo(x + 4, y + 0.5); ctx.moveTo(x + 0.5, y - 3); ctx.lineTo(x + 0.5, y + 4);
+    }
     ctx.stroke();
 
     for (i = 0; i < stars.length; i++) {
@@ -478,7 +480,7 @@ pnpm start -- --config swarm.json</pre>
       // names surface near the pointer
       if (pointer && a !== focus()) {
         var d = Math.sqrt((a.x - pointer.x) * (a.x - pointer.x) + (a.y - pointer.y) * (a.y - pointer.y));
-        if (d < 150) { ctx.globalAlpha = (1 - d / 150) * 0.9; ctx.fillStyle = C.muted; ctx.fillText(a.name, a.x + size + 4, a.y + 0.5); }
+        if (d < 150) { ctx.globalAlpha = (1 - d / 150) * 0.9; ctx.fillStyle = C.muted; ctx.fillText(a.name.toUpperCase(), a.x + size + 4, a.y + 0.5); }
       }
     }
     ctx.globalAlpha = 1;
@@ -510,16 +512,16 @@ pnpm start -- --config swarm.json</pre>
     if (!a) key = "";
     else if (hovered) {
       key = "a:" + a.name + a.state;
-      html = '<div class="callout-head"><span class="label">Agent</span><span class="label ' + (a.state === "buy" ? "ice" : a.state === "hold" ? "" : "sun") + '">' + a.state + "</span></div>" +
-        '<p class="callout-title">' + a.name + '</p><p class="callout-sub">' + a.preset.name + " / " + a.token + '</p><dl class="traits">' + traitRows(a.preset.t) + "</dl>";
+      html = '<div class="callout-head"><span class="label">Unit</span><span class="label ' + (a.state === "buy" ? "ice" : a.state === "hold" ? "" : "sun") + '">[ ' + a.state + " ]</span></div>" +
+        '<p class="callout-title">' + a.name + '</p><p class="callout-sub">class ' + a.preset.id + " :: tgt " + a.token + '</p><dl class="traits">' + traitRows(a.preset.t) + "</dl>";
     } else if (story.phase === 0) {
       key = "s0" + story.token; cls += " alert";
-      html = '<div class="callout-head"><span class="label sun">Signal / high</span><span class="label">' + story.at + "</span></div>" +
-        '<p class="callout-title">whale_sell on ' + story.token + '</p><p class="callout-sub">seen by ' + a.name + ", posted to the board</p>";
+      html = '<div class="callout-head"><span class="label sun">[!] Signal // high</span><span class="label">' + story.at + "</span></div>" +
+        '<p class="callout-title">whale_sell :: ' + story.token + '</p><p class="callout-sub">src ' + a.name + " &gt; board</p>";
     } else {
       key = "s1" + story.token; cls += " ok";
-      html = '<div class="callout-head"><span class="label ice">Exited</span><span class="label">' + story.at + "</span></div>" +
-        '<p class="callout-title">' + story.count + " agents out of " + story.token + '</p><p class="callout-sub">the whole swarm, between ticks</p>';
+      html = '<div class="callout-head"><span class="label ice">[ok] Swarm clear</span><span class="label">' + story.at + "</span></div>" +
+        '<p class="callout-title">' + story.count + " units out :: " + story.token + '</p><p class="callout-sub">exit complete</p>';
     }
     if (key === cardKey) return;
     cardKey = key;
@@ -536,7 +538,7 @@ pnpm start -- --config swarm.json</pre>
     x = Math.max(12, Math.min(W - cw - 12, x)); y = Math.max(76, Math.min(H - ch - 12, y));
     card.style.transform = "translate(" + Math.round(x) + "px," + Math.round(y) + "px)";
   }
-  function setStatus(text, alert) { elStatus.textContent = text; elStatus.className = "status" + (alert ? " alert" : ""); }
+  function setStatus(text, alert) { elStatus.textContent = text; elStatus.className = alert ? "alert" : ""; }
 
   var last = 0, running = false, visible = true;
   function step(dt) {
@@ -558,12 +560,12 @@ pnpm start -- --config swarm.json</pre>
       story = { phase: 0, token: token, agent: group[Math.floor(rnd() * group.length)], start: time, count: group.length, at: stamp() };
       pulses.push(time);
       group.forEach(function (g) { g.state = "exit"; g.flash = time + 0.4 + rnd() * 1.2; });
-      setStatus("Signal: whale_sell on " + token, true);
+      setStatus("SIGNAL :: WHALE_SELL " + token, true);
     }
     if (story) {
       var t = time - story.start;
-      if (story.phase === 0 && t > 3.2) { story.phase = 1; setStatus("Swarm out of " + story.token, false); }
-      else if (story.phase === 1 && t > 6.6) { story = null; nextSignal = time + 8 + rnd() * 5; setStatus(agents.length + " agents in orbit", false); }
+      if (story.phase === 0 && t > 3.2) { story.phase = 1; setStatus("CLEAR :: " + story.token, false); }
+      else if (story.phase === 1 && t > 6.6) { story = null; nextSignal = time + 8 + rnd() * 5; setStatus("NOMINAL", false); }
     }
     while (pulses.length && time - pulses[0] > 2.4) pulses.shift();
   }
