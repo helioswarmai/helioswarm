@@ -6,6 +6,9 @@
 // live group (a keypair file named by an env var). Keys never go in the file.
 import { readFileSync } from "node:fs";
 
+import { DEFAULT_COORDINATION, type CoordinationConfig, type SignalKind } from "./board";
+import { DEFAULT_SIGNALS, type SignalConfig } from "./stream/signals";
+import { DEFAULT_STREAM, type StreamConfig } from "./stream/types";
 import { normalizeRules, PSYCHOLOGIES, type PsychologyId, type TradingRules } from "./types";
 
 export type Mode = "paper" | "live";
@@ -68,6 +71,10 @@ export interface SwarmConfig {
   /** Modules that call registerTask() to add task types. Paths are relative to the config file. */
   plugins: string[];
   groups: GroupConfig[];
+  coordination: CoordinationConfig;
+  /** Real-time on-chain data (SVS Yellowstone gRPC). Off when absent. */
+  stream: StreamConfig | null;
+  signals: SignalConfig;
 }
 
 const PRESET_IDS = new Set(PSYCHOLOGIES.map((p) => p.id));
@@ -110,6 +117,9 @@ export function parseConfig(raw: unknown): SwarmConfig {
     killFile: r.killFile ?? "SWARM_STOP",
     plugins: Array.isArray(r.plugins) ? r.plugins.map((p: unknown, i: number) => str(p, `plugins[${i}]`)) : [],
     groups: groups.map((g: any, i: number) => parseGroup(g, `groups[${i}]`)),
+    coordination: parseCoordination(r.coordination),
+    stream: parseStream(r.stream),
+    signals: parseSignals(r.signals),
   };
   if (feedKind === "agentchain" && !cfg.feed.engineUrl) throw new Error("feed.engineUrl is required for the agentchain feed");
   return cfg;
@@ -141,6 +151,62 @@ function parseGroup(g: any, label: string): GroupConfig {
     rules: normalizeRules(g.rules),
     brain,
     taskOptions: g.taskOptions ?? {},
+  };
+}
+
+const SIGNAL_KINDS: SignalKind[] = ["whale_sell", "holder_moved", "sell_pressure", "buy_pressure", "note"];
+const kinds = (x: unknown, label: string, dflt: SignalKind[]): SignalKind[] => {
+  if (x === undefined) return dflt;
+  if (!Array.isArray(x) || x.some((k) => !SIGNAL_KINDS.includes(k))) throw new Error(`${label} must list signal kinds from ${SIGNAL_KINDS.join(", ")}`);
+  return x;
+};
+
+function parseCoordination(c: any): CoordinationConfig {
+  const d = DEFAULT_COORDINATION;
+  if (c === undefined) return { ...d };
+  return {
+    maxAgentsPerCoin: c.maxAgentsPerCoin === undefined ? undefined : num(c.maxAgentsPerCoin, "coordination.maxAgentsPerCoin", 1, 10_000),
+    maxSwarmSolPerCoin: c.maxSwarmSolPerCoin === undefined ? undefined : num(c.maxSwarmSolPerCoin, "coordination.maxSwarmSolPerCoin", 0, 100_000),
+    noSelfTradeMs: num(c.noSelfTradeMs, "coordination.noSelfTradeMs", 0, 86_400_000, d.noSelfTradeMs),
+    exitOn: kinds(c.exitOn, "coordination.exitOn", d.exitOn),
+    avoidOn: kinds(c.avoidOn, "coordination.avoidOn", d.avoidOn),
+    followBuyPressure: c.followBuyPressure === undefined ? d.followBuyPressure : Boolean(c.followBuyPressure),
+  };
+}
+
+function parseStream(s: any): StreamConfig | null {
+  if (s == null) return null;
+  if (s.kind !== undefined && s.kind !== "svs") throw new Error(`stream.kind must be "svs"`);
+  const accounts = Array.isArray(s.accounts) ? s.accounts.map((a: unknown, i: number) => str(a, `stream.accounts[${i}]`)) : [];
+  for (const [i, a] of accounts.entries()) if (!isMint(a)) throw new Error(`stream.accounts[${i}] is not a Solana address`);
+  const commitment = s.commitment ?? DEFAULT_STREAM.commitment;
+  if (commitment !== "processed" && commitment !== "confirmed") throw new Error(`stream.commitment must be "processed" or "confirmed"`);
+  return {
+    kind: "svs",
+    endpoint: str(s.endpoint ?? "https://basic.grpc.solanavibestation.com", "stream.endpoint"),
+    tokenEnv: s.tokenEnv ?? DEFAULT_STREAM.tokenEnv,
+    accounts,
+    commitment,
+    snapshot: s.snapshot === undefined ? DEFAULT_STREAM.snapshot : Boolean(s.snapshot),
+  };
+}
+
+function parseSignals(s: any): SignalConfig {
+  const d = DEFAULT_SIGNALS;
+  const x = s ?? {};
+  return {
+    whaleSellPct: num(x.whaleSellPct, "signals.whaleSellPct", 0.001, 100, d.whaleSellPct),
+    holderMovedPct: num(x.holderMovedPct, "signals.holderMovedPct", 0.001, 100, d.holderMovedPct),
+    overhangPct: num(x.overhangPct, "signals.overhangPct", 0.1, 100, d.overhangPct),
+    buyPressureBuyers: num(x.buyPressureBuyers, "signals.buyPressureBuyers", 1, 10_000, d.buyPressureBuyers),
+    buyPressureSol: num(x.buyPressureSol, "signals.buyPressureSol", 0, 1_000_000, d.buyPressureSol),
+    windowSec: num(x.windowSec, "signals.windowSec", 5, 86_400, d.windowSec),
+    ttlSec: num(x.ttlSec, "signals.ttlSec", 5, 86_400, d.ttlSec),
+    risk: {
+      profitFullAt: num(x.risk?.profitFullAt, "signals.risk.profitFullAt", 1.1, 1000, d.risk.profitFullAt),
+      recentSellMs: num(x.risk?.recentSellMs, "signals.risk.recentSellMs", 0, 86_400_000, d.risk.recentSellMs),
+      freshWalletMs: num(x.risk?.freshWalletMs, "signals.risk.freshWalletMs", 0, 86_400_000, d.risk.freshWalletMs),
+    },
   };
 }
 

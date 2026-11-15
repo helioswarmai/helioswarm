@@ -1,6 +1,7 @@
 // Task types an agent can run each tick. "trade" is the main one; "watch" and
 // "report" show the shape for other jobs. Add your own with registerTask(),
 // from code or from a plugin module listed in the config's "plugins".
+import type { Board } from "./board";
 import type { Brain } from "./brain";
 import type { PriceFeed } from "./feeds";
 import type { Book, Fill, Ledger } from "./ledger";
@@ -12,13 +13,15 @@ export interface TaskContext {
   feed: PriceFeed;
   ledger: Ledger;
   brain: Brain;
+  board: Board;
   now: number;
   tick: number;
   /** This task's options from the group's taskOptions. */
   options: Record<string, unknown>;
   /** Places a buy through the swarm's guard rails. Returns null if a rail refused it. */
   buy(mint: string, sol: number, reason: string): Promise<Fill | null>;
-  sell(mint: string, fraction: number, reason: string): Promise<Fill | null>;
+  /** urgent sells (rule exits, swarm exits) are never held back by the transaction rate. */
+  sell(mint: string, fraction: number, reason: string, urgent?: boolean): Promise<Fill | null>;
   /** Largest buy the rails would allow right now. */
   buyRoom(mint?: string): number;
   log(event: string, data?: Record<string, unknown>): void;
@@ -59,11 +62,11 @@ export const tradeTask: Task = {
       else if (rules.stopLossPct != null && pnlPct <= -rules.stopLossPct) why = `stop loss at ${pnlPct.toFixed(1)}%`;
       else if (rules.sellAfterMin != null && ctx.now - p.openedAt >= rules.sellAfterMin * 60_000) why = `held ${rules.sellAfterMin} min`;
       if (why) {
-        await ctx.sell(p.mint, 1, `rule: ${why}`);
+        await ctx.sell(p.mint, 1, `rule: ${why}`, true);
         return;
       }
     }
-    const action = await ctx.brain.decide({ agent: ctx.agent, book: ctx.book, feed: ctx.feed, maxBuySol: ctx.buyRoom(), now: ctx.now });
+    const action = await ctx.brain.decide({ agent: ctx.agent, book: ctx.book, feed: ctx.feed, maxBuySol: ctx.buyRoom(), now: ctx.now, board: ctx.board });
     if (action.kind === "buy") await ctx.buy(action.mint, Math.min(action.sol, ctx.buyRoom(action.mint)), action.reason);
     else if (action.kind === "sell") await ctx.sell(action.mint, action.fraction, action.reason);
   },

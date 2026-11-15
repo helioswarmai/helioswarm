@@ -11,6 +11,7 @@ cp swarm.example.json swarm.json # edit targets, groups, risk
 pnpm start -- --config swarm.json
 pnpm start -- --config swarm.json --ticks 50   # a bounded run
 pnpm start -- --config swarm.json --wallets   # create/list one wallet per agent
+pnpm start -- --config swarm.json --watch     # stream on-chain flows and signals only
 pnpm start -- --roster                               # list roster agents
 ```
 
@@ -32,6 +33,9 @@ Every event (fill, refused order, alert, report, summary) is a JSON line on stdo
 | `live.jupiterUrl` | `https://lite-api.jup.ag` | Jupiter API base |
 | `walletsDir` | `wallets` | Folder of per-agent keypair files, relative to the config file |
 | `feeReserveSol` | `0.01` | SOL each live wallet keeps back for fees and token-account rent |
+| `coordination` | see below | How agents share the board |
+| `stream` | off | Real-time on-chain data from SVS, see below |
+| `signals` | see below | Thresholds for stream signals |
 | `plugins` | `[]` | Modules that call `registerTask()` to add task types |
 | `groups` | | See below |
 
@@ -71,6 +75,68 @@ registerTask("snapshot", () => ({
 
 A task gets the agent, its book, the price feed, its brain, per-task options and state, and `ctx.buy` / `ctx.sell`, which go through the swarm's guard rails (per-buy cap, agent cash, per-coin rules, swarm spend ceiling, transaction rate).
 
+## Coordination: the shared board
+
+Every agent reads one shared board before it decides. The board shows what the other agents hold, which coins any agent just sold, and every live signal about a coin. The `claude` brain sees all of this in its prompt. The `traits` brain sells out of flagged coins, skips blocked ones and leans toward coins with buy pressure.
+
+| `coordination` key | Default | |
+|---|---|---|
+| `maxAgentsPerCoin` | none | At most this many agents hold one coin at once |
+| `maxSwarmSolPerCoin` | none | At most this much SOL (at cost) across the swarm in one coin |
+| `noSelfTradeMs` | `30000` | After any agent sells a coin, no agent buys it for this long, so the swarm never buys from itself |
+| `exitOn` | `["whale_sell", "holder_moved"]` | High-severity signals that sell every agent out of the coin at once, between ticks |
+| `avoidOn` | `["whale_sell", "holder_moved", "sell_pressure"]` | Signals that block new buys while they are active |
+| `followBuyPressure` | `false` | Let a `buy_pressure` signal wake agents targeting the coin between ticks |
+
+Coordination is about risk: spreading out, getting out together and not trading against each other. There is deliberately nothing for staging buys across wallets to look like organic demand, or for trading between the swarm's own wallets.
+
+## Real-time on-chain data (SVS)
+
+With a `stream` section, the swarm subscribes to Solana Vibe Station's Yellowstone gRPC. It receives every transaction that touches the target tokens as it lands, at `processed` commitment by default.
+
+```json
+"stream": {
+  "endpoint": "https://basic.grpc.solanavibestation.com",
+  "tokenEnv": "SVS_X_TOKEN",
+  "accounts": [],
+  "commitment": "processed",
+  "snapshot": true
+}
+```
+
+- **Auth:** set your SVS gRPC key in `SVS_X_TOKEN`. It is sent as the `x-token` header. Use `ultra` or `elite` for those plans, or `<tier>.grpc.atl1` / `<tier>.grpc.ams1` for a fixed region.
+- **`accounts`:** extra addresses to stream, such as a pool or bonding curve. The target mints are always included.
+- **Holder snapshot:** with `snapshot` on and `SOLANA_RPC_URL` set (your SVS RPC URL works), startup loads each token's supply and its 20 largest holders. The stream keeps them current after that.
+- **Parsing:** each transaction is read from its balance changes. That turns it into per-wallet buys, sells and wallet-to-wallet moves, with SOL size and price, on any DEX, bonding curve or aggregator. Pools and curves are spotted and left out of the holder list. Trade prices also feed the agents' price history between ticks.
+- **Holder book:** for every wallet, the swarm tracks balance, cost basis, buys and sells, and where its tokens came from.
+
+Signals posted to the board:
+
+| Signal | Fires when | Severity |
+|---|---|---|
+| `whale_sell` | One sell of at least `whaleSellPct`% of supply | high: swarm exits now |
+| `holder_moved` | A holder with at least `holderMovedPct`% of supply moves tokens to another wallet (a common step before a dump) | high: swarm exits now |
+| `sell_pressure` | Likely-seller overhang reaches `overhangPct`% of supply. Overhang is the sum over the top 50 holders of share × sell risk. | low, or high at twice the threshold |
+| `buy_pressure` | At least `buyPressureBuyers` distinct wallets put in `buyPressureSol` SOL net within `windowSec` | low |
+
+A holder's sell risk is a 0 to 1 heuristic. It rises when the holder:
+
+- is up on its entry, at full weight from `signals.risk.profitFullAt`, 3x by default
+- sold recently and still holds
+- just received tokens moved from another holder
+- has been splitting its bag across wallets
+- is a quick flip in profit
+
+The swarm's own wallets never trigger signals.
+
+```sh
+SVS_X_TOKEN=... SOLANA_RPC_URL=... pnpm start -- --config swarm.json --watch   # flows and signals only, no trading
+```
+
+`--watch` prints every parsed flow and signal as JSON lines. Use it to check your token and tune thresholds before letting agents act on them. During a normal run, set `SWARM_LOG_FLOWS=1` to log flows too.
+
+**What it can't do:** a sell is only visible once it has landed. Solana has no public mempool, so the swarm can't jump ahead of a sell it sees. The edge comes from the warning signs (profit, wallet moves, partial sells) and from reacting within about a second of the slot.
+
 ## Wallets: one per agent
 
 Every agent has its own Solana wallet and signs its own swaps. No wallet is shared, so on chain each agent is a separate buyer.
@@ -94,5 +160,6 @@ Without `SWARM_LIVE=1` a live config runs on paper and says so.
 ## Limits of this first cut
 
 - Live fills are booked at Jupiter's quoted amount, not parsed from the landed transaction; sells are capped at the wallet's real token balance.
+- Holder books start from the RPC snapshot (top 20) and only learn cost basis from trades seen live, so profit-based risk builds up while the stream runs.
 - The swarm keeps its books in memory, so a restart starts every agent fresh (positions in a live wallet stay put; sell them by hand or with a new run's agents).
 - Trading AgentChain coins live still goes through the engine's own runtime (`ENGINE_ROLE=runtime`); here the `agentchain` feed is for paper runs, and graduated coins can be traded live through Jupiter.

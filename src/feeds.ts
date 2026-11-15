@@ -121,3 +121,31 @@ export function changeOver(feed: PriceFeed, mint: string, n: number): number {
   const b = h[h.length - 1]!.priceSol;
   return a > 0 ? b / a - 1 : 0;
 }
+
+/**
+ * Wraps a feed and also takes trade prices from the on-chain stream as they land,
+ * so momentum and exits see moves between ticks.
+ */
+export class LiveFeed extends BaseFeed {
+  readonly kind: string;
+  private lastObserved = new Map<string, number>();
+  constructor(private inner: PriceFeed, private minGapMs = 1_000) {
+    super();
+    this.kind = `${inner.kind}+stream`;
+  }
+  async refresh(mints: string[]) {
+    await this.inner.refresh(mints);
+    for (const m of mints) {
+      const q = this.inner.latest(m);
+      if (q && q.ts !== this.latest(m)?.ts) this.push(m, { ...q, decimals: q.decimals ?? this.latest(m)?.decimals });
+    }
+  }
+  /** A trade price from the stream. Throttled per mint so history stays readable. */
+  observe(mint: string, priceSol: number, ts: number, decimals?: number) {
+    if (!(priceSol > 0)) return;
+    const last = this.lastObserved.get(mint);
+    if (last != null && ts - last < this.minGapMs) return;
+    this.lastObserved.set(mint, ts);
+    this.push(mint, { priceSol, ts, decimals: decimals ?? this.latest(mint)?.decimals });
+  }
+}

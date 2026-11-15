@@ -19,6 +19,30 @@
   "feeReserveSol": 0.01,
   "killFile": "SWARM_STOP",
   "plugins": [],
+  "coordination": {
+    "maxAgentsPerCoin": 4,
+    "maxSwarmSolPerCoin": 0.5,
+    "noSelfTradeMs": 30000,
+    "exitOn": [
+      "whale_sell",
+      "holder_moved"
+    ],
+    "avoidOn": [
+      "whale_sell",
+      "holder_moved",
+      "sell_pressure"
+    ],
+    "followBuyPressure": false
+  },
+  "signals": {
+    "whaleSellPct": 1,
+    "holderMovedPct": 1,
+    "overhangPct": 15,
+    "buyPressureBuyers": 8,
+    "buyPressureSol": 5,
+    "windowSec": 120,
+    "ttlSec": 300
+  },
   "groups": [
     {
       "roster": [

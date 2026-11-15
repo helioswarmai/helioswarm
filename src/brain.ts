@@ -7,6 +7,7 @@
 import { describeRules, GOALS } from "./types";
 
 import { changeOver, type PriceFeed } from "./feeds";
+import type { Board } from "./board";
 import type { Book } from "./ledger";
 import type { AgentSpec } from "./roster";
 import { hashSeed, rng } from "./rng";
@@ -23,6 +24,8 @@ export interface BrainInput {
   /** Largest buy allowed right now (risk caps and cash already applied). */
   maxBuySol: number;
   now: number;
+  /** The swarm's shared board: peers' positions and active signals. */
+  board?: Board;
 }
 
 export interface Brain {
@@ -42,8 +45,15 @@ export class TraitBrain implements Brain {
     this.r = rng(typeof seed === "string" ? hashSeed(seed) : seed);
   }
 
-  async decide({ agent, book, feed, maxBuySol }: BrainInput): Promise<Action> {
+  async decide({ agent, book, feed, maxBuySol, board, now }: BrainInput): Promise<Action> {
     const t = agent.traits;
+    // Swarm signals first: get out of anything flagged as about to dump.
+    if (board) {
+      for (const p of book.positions.values()) {
+        const s = board.active(p.mint, now).find((x) => board.cfg.exitOn.includes(x.kind) || x.kind === "sell_pressure");
+        if (s) return { kind: "sell", mint: p.mint, fraction: s.kind === "sell_pressure" && s.severity === "low" ? 0.5 : 1, reason: `${s.kind}: ${s.reasons[0] ?? ""}`.slice(0, 120) };
+      }
+    }
     // Short window for impatient agents, long for patient ones.
     const window = Math.round(3 + 12 * t01(t.patience));
     const contrarian = t01(t.contrarian) > 0.6;
@@ -62,7 +72,8 @@ export class TraitBrain implements Brain {
     const scored = agent.targets
       .filter((x) => feed.latest(x.mint))
       .map((x) => ({ x, ch: changeOver(feed, x.mint, window) }))
-      .map((s) => ({ ...s, score: contrarian ? -s.ch : s.ch }))
+      .filter((s) => !board?.buyBlock(agent.id, s.x.mint, now))
+      .map((s) => ({ ...s, score: (contrarian ? -s.ch : s.ch) + (board?.active(s.x.mint, now).some((x) => x.kind === "buy_pressure") ? 0.03 : 0) }))
       .sort((a, b) => b.score - a.score);
     const best = scored[0];
     if (!best) return { kind: "hold", reason: "no prices yet" };
@@ -138,7 +149,7 @@ function systemPrompt(a: AgentSpec): string {
     .join("\n");
 }
 
-function turnPrompt({ agent, book, feed, maxBuySol }: BrainInput): string {
+function turnPrompt({ agent, book, feed, maxBuySol, board, now }: BrainInput): string {
   const lines = [`Cash: ${book.cashSol.toFixed(4)} SOL. Largest buy allowed now: ${maxBuySol.toFixed(4)} SOL.`, "Targets:"];
   for (const t of agent.targets) {
     const q = feed.latest(t.mint);
@@ -146,6 +157,15 @@ function turnPrompt({ agent, book, feed, maxBuySol }: BrainInput): string {
     lines.push(`- ${t.symbol} ${t.mint}: price ${q.priceSol.toPrecision(4)} SOL, 5 ticks ${(changeOver(feed, t.mint, 5) * 100).toFixed(1)}%, 20 ticks ${(changeOver(feed, t.mint, 20) * 100).toFixed(1)}%`);
   }
   const pos = [...book.positions.values()];
+  if (board) {
+    const mine = new Set(agent.targets.map((t) => t.mint));
+    const peers = board.peers(agent.id).filter((p) => mine.has(p.mint));
+    lines.push(peers.length ? "Other swarm agents holding your targets:" : "No other swarm agent holds your targets.");
+    for (const p of peers) lines.push(`- ${p.agent} (${p.preset}) holds ${p.mint}, cost ${p.costSol.toFixed(4)} SOL`);
+    const sigs = agent.targets.flatMap((t) => board.active(t.mint, now));
+    if (sigs.length) lines.push("Live on-chain signals:");
+    for (const s of sigs) lines.push(`- ${s.kind} on ${s.mint} (${s.severity}): ${s.reasons.join("; ")}`);
+  }
   lines.push(pos.length ? "Positions:" : "No open positions.");
   for (const p of pos) {
     const q = feed.latest(p.mint);

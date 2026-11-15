@@ -1,11 +1,16 @@
 // CLI: pnpm start -- --config swarm.json [--ticks N]
 //      pnpm start -- --config swarm.json --wallets   (create missing agent wallets, list addresses and balances)
+//      pnpm start -- --config swarm.json --watch     (stream on-chain flows and signals only, no trading)
 //      pnpm start -- --roster        (list deployable roster agents)
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { liveArmed, loadConfig, type SwarmConfig } from "./config";
-import { AgentChainFeed, JupiterFeed, SimFeed, type PriceFeed } from "./feeds";
+import type { Signal } from "./board";
+import { AgentChainFeed, JupiterFeed, LiveFeed, SimFeed, type PriceFeed } from "./feeds";
+import { snapshotHolders } from "./stream/holders";
+import { parseTx } from "./stream/parse";
+import { SignalEngine } from "./stream/signals";
 import { expandGroups, loadRoster } from "./roster";
 import { Swarm } from "./swarm";
 import { JupiterVenue, PaperVenue } from "./venues";
@@ -26,6 +31,41 @@ function feedFor(cfg: SwarmConfig): PriceFeed {
     default:
       return new SimFeed(cfg.feed.seed ?? 1);
   }
+}
+
+/** Starts the SVS stream feeding a SignalEngine. Returns a stop function. */
+async function startStream(
+  cfg: SwarmConfig,
+  mints: string[],
+  rpcUrl: string | undefined,
+  post: (s: Signal) => void,
+  opts: { ourWallets?: Set<string>; onFlow?: (line: Record<string, unknown>) => void; feed?: LiveFeed } = {},
+): Promise<() => void> {
+  const sc = cfg.stream!;
+  const engine = new SignalEngine(mints, post, cfg.signals, opts.ourWallets);
+  if (sc.snapshot) {
+    if (!rpcUrl) console.warn("[stream] no SOLANA_RPC_URL: skipping the holder snapshot, shares use tracked balances until supply is known.");
+    else
+      for (const book of engine.books.values()) {
+        await snapshotHolders(rpcUrl, book).catch((e) => console.warn(`[stream] snapshot ${book.mint}: ${(e as Error).message}`));
+        console.warn(`[stream] ${book.mint}: supply ${book.supplyRaw ?? "?"}, ${book.holders.size} top holders loaded`);
+      }
+  }
+  const { SvsStream } = await import("./stream/svs");
+  const stream = new SvsStream(sc, mints);
+  const targets = new Set(mints);
+  stream.on("status", (m: string) => console.warn(`[stream] ${m}`));
+  stream.on("error", (e: Error) => console.warn(`[stream] error: ${e.message}`));
+  stream.on("tx", (tx) => {
+    const parsed = parseTx(tx, targets);
+    for (const f of parsed.flows) {
+      if (f.priceSol) opts.feed?.observe(f.mint, f.priceSol, f.ts, f.decimals);
+      opts.onFlow?.({ ts: new Date(f.ts).toISOString(), event: "flow", kind: f.kind, mint: f.mint, owner: f.owner, tokens: f.tokens, sol: +f.sol.toFixed(6), priceSol: f.priceSol, sig: f.signature, ...(f.counterparty ? { counterparty: f.counterparty } : {}) });
+    }
+    engine.ingest(parsed);
+  });
+  await stream.start();
+  return () => stream.stop();
 }
 
 async function main() {
@@ -55,6 +95,18 @@ async function main() {
     return;
   }
 
+  if (process.argv.includes("--watch")) {
+    if (!cfg.stream) throw new Error('--watch needs a "stream" section in the config');
+    const mints = [...new Set(specs.flatMap((s) => s.targets.map((t) => t.mint)))];
+    const stop = await startStream(cfg, mints, rpcUrl, (s) => console.log(JSON.stringify({ event: "signal", ...s, ts: new Date(s.ts).toISOString() })), { onFlow: (l) => console.log(JSON.stringify(l)) });
+    await new Promise<void>((done) => {
+      process.once("SIGINT", done);
+      process.once("SIGTERM", done);
+    });
+    stop();
+    return;
+  }
+
   const live = liveArmed(cfg);
   if (cfg.mode === "live" && !live) console.warn("[swarm] config says live but SWARM_LIVE=1 is not set: running on paper.");
 
@@ -68,8 +120,9 @@ async function main() {
     cfg.live.rpcUrl = rpcUrl;
   }
 
+  const liveFeed = cfg.stream ? new LiveFeed(feedFor(cfg)) : null;
   const swarm = new Swarm(cfg, specs, {
-    feed: feedFor(cfg),
+    feed: liveFeed ?? feedFor(cfg),
     venue: (ledger) =>
       live
         ? new JupiterVenue({ ledger, rpcUrl: cfg.live.rpcUrl!, jupiterUrl: cfg.live.jupiterUrl, slippageBps: cfg.risk.slippageBps, wallets })
@@ -87,10 +140,16 @@ async function main() {
       if (cash <= 0) console.warn(`[swarm] ${s.id} has ${bal} SOL in ${wallets.get(s.id)!.address}: below the fee reserve, it will not buy.`);
     }
   }
+  let stopStream = () => {};
+  if (cfg.stream) {
+    const ourWallets = new Set([...wallets.values()].map((w) => w.address as string));
+    stopStream = await startStream(cfg, swarm.mints, rpcUrl, (s) => swarm.board.post(s), { ourWallets, feed: liveFeed!, onFlow: process.env.SWARM_LOG_FLOWS === "1" ? (l) => swarm.log("flow", l) : undefined });
+  }
   process.once("SIGINT", () => swarm.stop("SIGINT"));
   process.once("SIGTERM", () => swarm.stop("SIGTERM"));
   const ticks = arg("ticks");
   await swarm.run(ticks ? Number(ticks) : undefined);
+  stopStream();
 }
 
 main().catch((e) => {
