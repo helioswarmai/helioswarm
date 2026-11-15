@@ -10,3 +10,4 @@ swarm.json
 swarm.log.jsonl
 SWARM_STOP
 *.keypair.json
+wallets/

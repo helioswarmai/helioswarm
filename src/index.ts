@@ -6,3 +6,4 @@ export * from "./roster";
 export * from "./swarm";
 export * from "./tasks";
 export * from "./venues";
+export * from "./wallets";

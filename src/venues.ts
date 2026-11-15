@@ -1,11 +1,8 @@
 // Where orders go. PaperVenue fills at the feed price with slippage and a fee.
 // JupiterVenue swaps for real through Jupiter on Solana mainnet and is only
 // built when live trading is armed (config mode "live" and SWARM_LIVE=1).
-import { readFileSync } from "node:fs";
-
 import {
   address,
-  createKeyPairSignerFromBytes,
   createSolanaRpc,
   getBase64Encoder,
   getBase64EncodedWireTransaction,
@@ -55,13 +52,6 @@ export class PaperVenue implements Venue {
   }
 }
 
-/** Reads a solana-keygen JSON keypair file. */
-export async function loadKeypairFile(path: string): Promise<KeyPairSigner> {
-  const bytes = JSON.parse(readFileSync(path, "utf8")) as number[];
-  if (!Array.isArray(bytes) || bytes.length !== 64) throw new Error(`${path} is not a 64-byte keypair file`);
-  return createKeyPairSignerFromBytes(new Uint8Array(bytes));
-}
-
 interface JupQuote {
   inAmount: string;
   outAmount: string;
@@ -73,8 +63,8 @@ export interface JupiterVenueOptions {
   rpcUrl: string;
   jupiterUrl: string;
   slippageBps: number;
-  /** One signer per group index. */
-  wallets: Map<number, KeyPairSigner>;
+  /** One signer per agent id: every agent trades from its own wallet. */
+  wallets: Map<string, KeyPairSigner>;
   /** Priority fee ceiling per swap, in lamports. */
   maxPriorityLamports?: number;
   fetcher?: typeof fetch;
@@ -92,7 +82,7 @@ export class JupiterVenue implements Venue {
   async buy(ctx: OrderContext, mint: string, sol: number, q: Quote): Promise<Fill | null> {
     const lamports = BigInt(Math.floor(sol * 1e9));
     const quote = await this.quote(SOL_MINT, mint, lamports);
-    const sig = await this.swap(ctx.group, quote);
+    const sig = await this.swap(ctx.agent, quote);
     const decimals = q.decimals ?? 6;
     const raw = BigInt(quote.outAmount);
     const tokens = Number(raw) / 10 ** decimals;
@@ -106,11 +96,11 @@ export class JupiterVenue implements Venue {
     if (!p?.raw) return null;
     let raw = fraction >= 0.999 ? p.raw : (p.raw * BigInt(Math.round(fraction * 10_000))) / 10_000n;
     // Never try to sell more than the wallet actually holds.
-    const onChain = await this.tokenBalance(ctx.group, mint);
+    const onChain = await this.tokenBalance(ctx.agent, mint);
     if (raw > onChain) raw = onChain;
     if (raw <= 0n) return null;
     const quote = await this.quote(mint, SOL_MINT, raw);
-    const sig = await this.swap(ctx.group, quote);
+    const sig = await this.swap(ctx.agent, quote);
     const sol = Number(BigInt(quote.outAmount)) / 1e9;
     const tokens = Number(raw) / 10 ** (p.decimals ?? q.decimals ?? 6);
     const f: Fill = { agent: ctx.agent, side: "sell", mint, sol, tokens, priceSol: tokens > 0 ? sol / tokens : q.priceSol, ts: ctx.now, sig, reason: ctx.reason };
@@ -118,9 +108,10 @@ export class JupiterVenue implements Venue {
     return f;
   }
 
-  private wallet(group: number): KeyPairSigner {
-    const w = this.o.wallets.get(group);
-    if (!w) throw new Error(`no wallet loaded for group ${group}`);
+  /** The agent's own signer. There is no shared or fallback wallet. */
+  signerFor(agent: string): KeyPairSigner {
+    const w = this.o.wallets.get(agent);
+    if (!w) throw new Error(`no wallet loaded for agent ${agent}`);
     return w;
   }
 
@@ -131,8 +122,8 @@ export class JupiterVenue implements Venue {
     return (await res.json()) as JupQuote;
   }
 
-  private async swap(group: number, quoteResponse: JupQuote): Promise<string> {
-    const signer = this.wallet(group);
+  private async swap(agent: string, quoteResponse: JupQuote): Promise<string> {
+    const signer = this.signerFor(agent);
     const res = await this.fetcher(`${this.o.jupiterUrl}/swap/v1/swap`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -165,8 +156,8 @@ export class JupiterVenue implements Venue {
     throw new Error(`swap ${sig} did not confirm in time`);
   }
 
-  private async tokenBalance(group: number, mint: string): Promise<bigint> {
-    const owner = this.wallet(group).address;
+  private async tokenBalance(agent: string, mint: string): Promise<bigint> {
+    const owner = this.signerFor(agent).address;
     const { value } = await this.rpc.getTokenAccountsByOwner(owner, { mint: address(mint) }, { encoding: "jsonParsed" }).send();
     let total = 0n;
     for (const a of value) {

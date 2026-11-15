@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,7 +6,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   ClaudeBrain,
+  ensureWallets,
   expandGroups,
+  JupiterVenue,
+  Ledger,
+  loadKeypairFile,
+  loadWallets,
+  walletFileName,
+  walletPath,
   JupiterFeed,
   liveArmed,
   loadRoster,
@@ -72,14 +79,16 @@ describe("config", () => {
     expect(c.groups[0]!.targets[1]!.symbol).toBe("EKpQ");
   });
 
-  it("rejects bad mints, unknown presets and live groups without a wallet", () => {
+  it("rejects bad mints, unknown presets and the old shared group wallet", () => {
     expect(() => config({}, { targets: ["not-a-mint"] })).toThrow(/Solana address/);
     expect(() => config({}, { preset: "wizard" })).toThrow(/preset/);
-    expect(() => config({ mode: "live" })).toThrow(/walletEnv/);
+    expect(() => config({ mode: "live" }, { walletEnv: "W" })).toThrow(/its own wallet/);
+    expect(config().walletsDir).toBe("wallets");
+    expect(config().feeReserveSol).toBe(0.01);
   });
 
   it("arms live only with the file and SWARM_LIVE=1 together", () => {
-    const c = config({ mode: "live" }, { walletEnv: "W" });
+    const c = config({ mode: "live" });
     expect(liveArmed(c, {})).toBe(false);
     expect(liveArmed(c, { SWARM_LIVE: "1" })).toBe(true);
     expect(liveArmed(config(), { SWARM_LIVE: "1" })).toBe(false);
@@ -215,5 +224,50 @@ describe("JupiterFeed", () => {
     await feed.refresh([BONK]);
     expect(feed.latest(BONK)!.priceSol).toBeCloseTo(1e-7, 12);
     expect(feed.latest(BONK)!.decimals).toBe(5);
+  });
+});
+
+describe("per-agent wallets", () => {
+  const ids = () => expandGroups(config().groups).map((s) => s.id);
+
+  it("creates one keypair file per agent, each with its own address", async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), "swarm-w-")), "wallets");
+    expect(ensureWallets(dir, ids())).toEqual(["degen-1", "degen-2", "degen-3"]);
+    const wallets = await loadWallets(dir, ids());
+    const addrs = [...wallets.values()].map((w) => w.address);
+    expect(new Set(addrs).size).toBe(3);
+    const bytes = JSON.parse(readFileSync(walletPath(dir, "degen-1"), "utf8"));
+    expect(bytes).toHaveLength(64);
+    expect(statSync(walletPath(dir, "degen-1")).mode & 0o777).toBe(0o600);
+    // The stored public key half matches the signer's address.
+    expect((await loadKeypairFile(walletPath(dir, "degen-1"))).address).toBe(wallets.get("degen-1")!.address);
+  });
+
+  it("never overwrites an existing wallet", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swarm-w-"));
+    ensureWallets(dir, ids());
+    const before = readFileSync(walletPath(dir, "degen-2"), "utf8");
+    expect(ensureWallets(dir, [...ids(), "degen-4"])).toEqual(["degen-4"]);
+    expect(readFileSync(walletPath(dir, "degen-2"), "utf8")).toBe(before);
+  });
+
+  it("refuses to run with a missing wallet or two agents on one wallet", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swarm-w-"));
+    ensureWallets(dir, ["a", "b"]);
+    await expect(loadWallets(dir, ["a", "b", "c"])).rejects.toThrow(/no wallet file for c/);
+    writeFileSync(walletPath(dir, "b"), readFileSync(walletPath(dir, "a")));
+    await expect(loadWallets(dir, ["a", "b"])).rejects.toThrow(/same wallet/);
+    expect(walletFileName("kev#2")).toBe("kev_2.json");
+    expect(() => ensureWallets(dir, ["kev#2", "kev_2"])).toThrow(/share wallet file/);
+  });
+
+  it("signs each agent's swaps with that agent's wallet only", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swarm-w-"));
+    ensureWallets(dir, ["a", "b"]);
+    const wallets = await loadWallets(dir, ["a", "b"]);
+    const venue = new JupiterVenue({ ledger: new Ledger(), rpcUrl: "http://127.0.0.1:1", jupiterUrl: "http://127.0.0.1:1", slippageBps: 100, wallets });
+    expect(venue.signerFor("a").address).toBe(wallets.get("a")!.address);
+    expect(venue.signerFor("b").address).not.toBe(venue.signerFor("a").address);
+    expect(() => venue.signerFor("c")).toThrow(/no wallet loaded for agent c/);
   });
 });

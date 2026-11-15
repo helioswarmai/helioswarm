@@ -37,8 +37,6 @@ export interface GroupConfig {
   /** Exits and limits, the same shape as AgentChain trading rules. */
   rules?: TradingRules;
   brain?: BrainKind;
-  /** Env var holding the path to this group's keypair file (live mode only). */
-  walletEnv?: string;
   /** Free-form per-task settings, e.g. { "watch": { "alertPct": 5 } }. */
   taskOptions?: Record<string, Record<string, unknown>>;
 }
@@ -61,6 +59,10 @@ export interface SwarmConfig {
   live: { rpcUrl?: string; jupiterUrl: string };
   /** JSONL event log; null to log to stdout only. */
   logFile: string | null;
+  /** Folder of per-agent keypair files (<agent id>.json), relative to the config file. */
+  walletsDir: string;
+  /** SOL each live wallet keeps back for fees and token-account rent; never traded. */
+  feeReserveSol: number;
   /** Create this file to stop the swarm at the next tick. */
   killFile: string;
   /** Modules that call registerTask() to add task types. Paths are relative to the config file. */
@@ -103,15 +105,17 @@ export function parseConfig(raw: unknown): SwarmConfig {
     },
     live: { rpcUrl: r.live?.rpcUrl, jupiterUrl: r.live?.jupiterUrl ?? "https://lite-api.jup.ag" },
     logFile: r.logFile === null ? null : (r.logFile ?? "swarm.log.jsonl"),
+    walletsDir: r.walletsDir ?? "wallets",
+    feeReserveSol: num(r.feeReserveSol, "feeReserveSol", 0, 10, 0.01),
     killFile: r.killFile ?? "SWARM_STOP",
     plugins: Array.isArray(r.plugins) ? r.plugins.map((p: unknown, i: number) => str(p, `plugins[${i}]`)) : [],
-    groups: groups.map((g: any, i: number) => parseGroup(g, `groups[${i}]`, mode)),
+    groups: groups.map((g: any, i: number) => parseGroup(g, `groups[${i}]`)),
   };
   if (feedKind === "agentchain" && !cfg.feed.engineUrl) throw new Error("feed.engineUrl is required for the agentchain feed");
   return cfg;
 }
 
-function parseGroup(g: any, label: string, mode: Mode): GroupConfig {
+function parseGroup(g: any, label: string): GroupConfig {
   if (!g || typeof g !== "object") throw new Error(`${label} must be an object`);
   const roster = Array.isArray(g.roster) ? g.roster.map((n: unknown, i: number) => str(n, `${label}.roster[${i}]`)) : undefined;
   if (!roster && !g.preset) throw new Error(`${label} needs a roster list or a preset`);
@@ -124,7 +128,7 @@ function parseGroup(g: any, label: string, mode: Mode): GroupConfig {
   if (!targets.length) throw new Error(`${label}.targets must list at least one mint`);
   const tasks = Array.isArray(g.tasks) && g.tasks.length ? g.tasks.map((t: unknown, i: number) => str(t, `${label}.tasks[${i}]`)) : ["trade"];
   const brain: BrainKind = g.brain === "claude" ? "claude" : "traits";
-  if (mode === "live" && !g.walletEnv) throw new Error(`${label}.walletEnv is required in live mode (the env var naming the group's keypair file)`);
+  if (g.walletEnv !== undefined) throw new Error(`${label}.walletEnv is gone: every agent now has its own wallet in walletsDir (run with --wallets)`);
   return {
     roster,
     preset: g.preset,
@@ -136,7 +140,6 @@ function parseGroup(g: any, label: string, mode: Mode): GroupConfig {
     tasks,
     rules: normalizeRules(g.rules),
     brain,
-    walletEnv: g.walletEnv,
     taskOptions: g.taskOptions ?? {},
   };
 }

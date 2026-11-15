@@ -30,9 +30,8 @@ export interface AgentSpec {
   tasks: string[];
   rules: TradingRules;
   brain: BrainKind;
-  /** Index of the group it came from (agents in a group share a wallet in live mode). */
+  /** Index of the group it came from. Each agent still has its own wallet. */
   group: number;
-  walletEnv?: string;
   taskOptions: Record<string, Record<string, unknown>>;
 }
 
@@ -51,7 +50,7 @@ export function expandGroups(groups: GroupConfig[], roster: RosterEntry[] = load
   const out: AgentSpec[] = [];
   const seen = new Set<string>();
   groups.forEach((g, gi) => {
-    const base = { bankrollSol: g.bankrollSol, targets: g.targets, tasks: g.tasks, brain: g.brain ?? "traits", group: gi, walletEnv: g.walletEnv, taskOptions: g.taskOptions ?? {} } as const;
+    const base = { bankrollSol: g.bankrollSol, targets: g.targets, tasks: g.tasks, brain: g.brain ?? "traits", group: gi, taskOptions: g.taskOptions ?? {} } as const;
     for (const name of g.roster ?? []) {
       const r = roster.find((x) => x.name.toLowerCase() === name.toLowerCase());
       if (!r) throw new Error(`no roster agent named "${name}"`);
