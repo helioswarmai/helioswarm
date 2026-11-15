@@ -11,3 +11,5 @@ swarm.log.jsonl
 SWARM_STOP
 *.keypair.json
 wallets/
+watch.out
+swarm.json.bak

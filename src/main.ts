@@ -61,7 +61,7 @@ async function startStream(
   stream.on("tx", (tx) => {
     learnTokenAccounts(tx, targets, index);
     const parsed = parseTx(tx, targets);
-    const early = engine.seenEarly(tx.signature, tx.ts);
+    const early = engine.seenEarly(tx.signature, Date.now()); // both sides on local arrival time
     for (const f of parsed.flows) {
       if (f.priceSol) opts.feed?.observe(f.mint, f.priceSol, f.ts, f.decimals);
       opts.onFlow?.({ ts: new Date(f.ts).toISOString(), event: "flow", kind: f.kind, mint: f.mint, owner: f.owner, tokens: f.tokens, sol: +f.sol.toFixed(6), priceSol: f.priceSol, sig: f.signature, ...(f.counterparty ? { counterparty: f.counterparty } : {}), ...(early != null ? { seenEarlyMs: early } : {}) });

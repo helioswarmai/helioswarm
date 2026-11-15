@@ -46,6 +46,24 @@ describe("decodePending", () => {
     expect(decodePending(tx([buyBase]), targets, index())[0]).toMatchObject({ kind: "sell", amountRaw: 900n });
   });
 
+  it("decodes the v2 / exact-quote-in PumpSwap instructions seen live (discriminators from the IDL)", () => {
+    // sell_v2 = 5df6823ce7e940b2, buy_exact_quote_in_v2 = c2ab1c46684d5b2f (captured from GATO traffic)
+    const hex = (h: string) => [...Buffer.from(h, "hex")];
+    const sellV2 = { programId: PROGRAMS.pumpSwap, accounts: [X, WHALE, X, MINT, WSOL], data: data(hex("5df6823ce7e940b2"), le(800n), le(1n)) };
+    expect(decodePending(tx([sellV2]), targets, index())[0]).toMatchObject({ kind: "sell", owner: WHALE, amountRaw: 800n, venue: "pumpswap" });
+    // Exact-quote-in buys state SOL spent then the minimum tokens out.
+    const buyQ = { programId: PROGRAMS.pumpSwap, accounts: [X, FRESH, X, MINT, WSOL], data: data(hex("c2ab1c46684d5b2f"), le(1_000_000n), le(4_200n)) };
+    expect(decodePending(tx([buyQ], [FRESH]), targets, index())[0]).toMatchObject({ kind: "buy", owner: FRESH, amountRaw: 4_200n });
+  });
+
+  it("decodes pump.fun v2 and v3 layouts (mint at 1, user at 13 / 8)", () => {
+    const accts = (userAt: number) => Array.from({ length: 17 }, (_, i) => (i === 1 ? MINT : i === userAt ? WHALE : X));
+    const v2 = { programId: PROGRAMS.pump, accounts: [...accts(13), X, X, X, X, X, X, X, X, X, X], data: data(anchorDisc("sell_v2"), le(321n), le(1n)) };
+    const v3 = { programId: PROGRAMS.pump, accounts: accts(8), data: data(anchorDisc("sell_v3"), le(654n), le(1n)) };
+    expect(decodePending(tx([v2]), targets, index())[0]).toMatchObject({ kind: "sell", owner: WHALE, amountRaw: 321n, venue: "pump.fun" });
+    expect(decodePending(tx([v3]), targets, index())[0]).toMatchObject({ kind: "sell", owner: WHALE, amountRaw: 654n });
+  });
+
   it("decodes a Raydium v4 sell from the source token account", () => {
     const accounts = [...Array(14).fill(X), WHALE_TA, X, WHALE];
     const ix = { programId: PROGRAMS.raydiumV4, accounts, data: data([9], le(1_234n), le(1n)) };

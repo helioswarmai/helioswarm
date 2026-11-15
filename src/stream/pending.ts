@@ -35,11 +35,38 @@ const IGNORED = new Set([
 /** Anchor instruction discriminator: first 8 bytes of sha256("global:<name>"). */
 export const anchorDisc = (name: string) => new Uint8Array(createHash("sha256").update(`global:${name}`).digest().subarray(0, 8));
 const DISC = {
-  buy: anchorDisc("buy"),
-  sell: anchorDisc("sell"),
   swapBaseInput: anchorDisc("swap_base_input"),
   swapBaseOutput: anchorDisc("swap_base_output"),
 };
+
+/**
+ * Buy/sell instructions, from the official IDLs (github.com/pump-fun/pump-public-docs/idl).
+ * mint/user: account indexes. amountAt: byte offset of the token amount; "bound" means it is a
+ * minimum (exact-SOL-in buys), not the exact amount.
+ */
+interface SwapIx { side: "buy" | "sell"; mint: number; user: number; amountAt: number; bound?: boolean; quoteAt: number }
+const entry = (name: string, l: SwapIx) => [Buffer.from(anchorDisc(name)).toString("hex"), l] as const;
+const PUMP_IX = new Map<string, SwapIx>([
+  entry("buy", { side: "buy", mint: 2, user: 6, amountAt: 8, quoteAt: 16 }),
+  entry("buy_exact_sol_in", { side: "buy", mint: 2, user: 6, amountAt: 16, bound: true, quoteAt: 8 }),
+  entry("sell", { side: "sell", mint: 2, user: 6, amountAt: 8, quoteAt: 16 }),
+  entry("buy_v2", { side: "buy", mint: 1, user: 13, amountAt: 8, quoteAt: 16 }),
+  entry("buy_exact_quote_in_v2", { side: "buy", mint: 1, user: 13, amountAt: 16, bound: true, quoteAt: 8 }),
+  entry("sell_v2", { side: "sell", mint: 1, user: 13, amountAt: 8, quoteAt: 16 }),
+  entry("buy_v3", { side: "buy", mint: 1, user: 8, amountAt: 8, quoteAt: 16 }),
+  entry("buy_exact_quote_in_v3", { side: "buy", mint: 1, user: 8, amountAt: 16, bound: true, quoteAt: 8 }),
+  entry("sell_v3", { side: "sell", mint: 1, user: 8, amountAt: 8, quoteAt: 16 }),
+]);
+// PumpSwap: every variant starts pool, user, global_config, base_mint, quote_mint.
+const PUMPSWAP_IX = new Map<string, SwapIx>([
+  entry("buy", { side: "buy", mint: 3, user: 1, amountAt: 8, quoteAt: 16 }),
+  entry("buy_v2", { side: "buy", mint: 3, user: 1, amountAt: 8, quoteAt: 16 }),
+  entry("buy_exact_quote_in", { side: "buy", mint: 3, user: 1, amountAt: 16, bound: true, quoteAt: 8 }),
+  entry("buy_exact_quote_in_v2", { side: "buy", mint: 3, user: 1, amountAt: 16, bound: true, quoteAt: 8 }),
+  entry("sell", { side: "sell", mint: 3, user: 1, amountAt: 8, quoteAt: 16 }),
+  entry("sell_v2", { side: "sell", mint: 3, user: 1, amountAt: 8, quoteAt: 16 }),
+]);
+const disc8 = (d: Uint8Array) => (d.length >= 8 ? Buffer.from(d.subarray(0, 8)).toString("hex") : "");
 const startsWith = (data: Uint8Array, d: Uint8Array) => data.length >= d.length && d.every((b, i) => data[i] === b);
 const u64 = (data: Uint8Array, off: number): bigint => (data.length >= off + 8 ? new DataView(data.buffer, data.byteOffset + off, 8).getBigUint64(0, true) : 0n);
 
@@ -132,22 +159,20 @@ export function decodePending(tx: PendingTx, targets: ReadonlySet<string>, index
       }
       continue;
     }
-    if (ix.programId === PROGRAMS.pump && a.length >= 7) {
-      // buy/sell(amount u64, sol limit u64); accounts: global, fee_recipient, mint, bonding_curve, assoc_curve, assoc_user, user, ...
-      const mint = a[2]!;
-      if (!targets.has(mint)) continue;
-      if (startsWith(d, DISC.sell)) out.push({ ...base, mint, owner: a[6]!, kind: "sell", amountRaw: u64(d, 8), venue: "pump.fun" });
-      else if (startsWith(d, DISC.buy)) out.push({ ...base, mint, owner: a[6]!, kind: "buy", amountRaw: u64(d, 8), venue: "pump.fun" });
+    if (ix.programId === PROGRAMS.pump) {
+      const l = PUMP_IX.get(disc8(d));
+      const mint = l && a[l.mint];
+      if (!l || !mint || !targets.has(mint) || !a[l.user]) continue;
+      out.push({ ...base, mint, owner: a[l.user]!, kind: l.side, amountRaw: u64(d, l.amountAt), venue: "pump.fun" });
       continue;
     }
-    if (ix.programId === PROGRAMS.pumpSwap && a.length >= 5) {
-      // sell(base_amount_in, min_quote_out) / buy(base_amount_out, max_quote_in); accounts: pool, user, global_config, base_mint, quote_mint, ...
+    if (ix.programId === PROGRAMS.pumpSwap) {
+      const l = PUMPSWAP_IX.get(disc8(d));
+      if (!l || a.length < 5) continue;
       const [, user, , baseMint, quoteMint] = a as [string, string, string, string, string];
-      const isSell = startsWith(d, DISC.sell);
-      const isBuy = startsWith(d, DISC.buy);
-      if (!isSell && !isBuy) continue;
-      if (targets.has(baseMint)) out.push({ ...base, mint: baseMint, owner: user, kind: isSell ? "sell" : "buy", amountRaw: u64(d, 8), venue: "pumpswap" });
-      else if (targets.has(quoteMint)) out.push({ ...base, mint: quoteMint, owner: user, kind: isSell ? "buy" : "sell", amountRaw: u64(d, 16), venue: "pumpswap" });
+      if (targets.has(baseMint)) out.push({ ...base, mint: baseMint, owner: user, kind: l.side, amountRaw: u64(d, l.amountAt), venue: "pumpswap" });
+      // Target is the quote side: buying base spends it, selling base receives it.
+      else if (targets.has(quoteMint)) out.push({ ...base, mint: quoteMint, owner: user, kind: l.side === "buy" ? "sell" : "buy", amountRaw: u64(d, l.quoteAt), venue: "pumpswap" });
       continue;
     }
     if (ix.programId === PROGRAMS.raydiumV4 && (d[0] === 9 || d[0] === 11) && a.length >= 17) {
