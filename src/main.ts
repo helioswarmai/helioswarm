@@ -232,6 +232,21 @@ async function main() {
           dash?.push({ event: "wallet", agent: s.id, address: agentWallets.get(s.id)!.address, balanceSol: b, tradableSol: b });
         }
       }
+      if (dash && rpcUrl) {
+        // Recent trades from the chain, so the chart and feed have history from the first visit.
+        const { backfillFlows } = await import("./backfill");
+        void backfillFlows(rpcUrl, mints)
+          .then((flows) => {
+            const lines: Record<string, unknown>[] = [];
+            for (const l of flows) {
+              const agent = byAddress.get(String(l.owner));
+              if (agent) lines.push({ ts: l.ts, event: "fill", agent, side: l.kind, mint: l.mint, sol: l.sol, tokens: l.tokens, priceSol: l.priceSol, sig: l.sig, reason: "on-chain" });
+              lines.push(l);
+            }
+            view.status(`dashboard: ${dash.seed(lines)} past trades loaded from chain`);
+          })
+          .catch((e) => view.status(`dashboard: trade backfill failed: ${(e as Error).message}`));
+      }
       const stopStream = await startStream(cfg, mints, rpcUrl, (s) => (view.signal(s), dash?.push({ event: "signal", ...s })), {
         onFlow: (l) => {
           view.event(l);

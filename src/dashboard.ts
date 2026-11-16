@@ -1,6 +1,7 @@
 // Live demo dashboard: `--dashboard [port]` on a trading run or a watch serves a page at
 // http://localhost:<port> that shows the agents, their wallets and trades, the market feed,
 // early (pre-execution) warnings and signals as they happen. Server-sent events, no deps.
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 
 export interface DashboardAgent {
@@ -18,20 +19,40 @@ export interface DashboardInfo {
   agents: DashboardAgent[];
 }
 
+/** How far back the page can look: history kept on the server and replayed to every new visitor. */
+const KEEP_MS = 60 * 60_000;
+const KEEP_MAX = 12_000;
+
+type Line = Record<string, unknown>;
+const ser = (line: Line) => JSON.stringify(line, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+/** One entry per transaction and wallet, so a trade seen live and again in a backfill shows once. */
+const keyOf = (line: Line) => (line.sig ? `${line.event}|${line.sig}|${line.owner ?? line.agent ?? ""}` : undefined);
+const tsOf = (line: Line) => Date.parse(String(line.ts ?? "")) || Date.now();
+
 export class Dashboard {
   private clients = new Set<ServerResponse>();
-  private history: string[] = [];
+  /** Time-ordered market and swarm events from the last hour. */
+  private history: { t: number; sig?: string; msg: string }[] = [];
+  private seen = new Set<string>();
+  /** Latest wallet line per agent, replayed before the history so balances are right. */
+  private wallets = new Map<string, string>();
   private server;
   private solUsd: number | null = null;
+  private file: string | null;
 
-  constructor(private info: DashboardInfo, port: number) {
+  constructor(private info: DashboardInfo, port: number, opts: { historyFile?: string | null } = {}) {
+    this.file = opts.historyFile === undefined ? process.env.DASHBOARD_HISTORY_FILE || null : opts.historyFile;
+    this.load();
     this.server = createServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0]!;
       if (path.endsWith("/events")) {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
         res.write(`event: info\ndata: ${JSON.stringify(this.info)}\n\n`);
         if (this.solUsd) res.write(`data: ${JSON.stringify({ event: "solusd", usd: this.solUsd })}\n\n`);
-        for (const h of this.history) res.write(h);
+        for (const w of this.wallets.values()) res.write(w);
+        this.prune();
+        res.write(this.history.map((h) => h.msg).join(""));
+        res.write(`data: ${JSON.stringify({ event: "synced" })}\n\n`);
         this.clients.add(res);
         req.on("close", () => this.clients.delete(res));
         return;
@@ -48,6 +69,9 @@ export class Dashboard {
       for (const c of this.clients) c.write(": ping\n\n");
     }, 15_000);
     ping.unref();
+    // Rewrite the history file now and then so it only holds the last hour.
+    const compact = setInterval(() => this.save(), 5 * 60_000);
+    compact.unref();
     // SOL/USD for market cap in dollars, from Jupiter's public price API once a minute.
     const solPrice = async () => {
       try {
@@ -68,14 +92,89 @@ export class Dashboard {
     usdTimer.unref();
   }
 
-  push(line: Record<string, unknown>) {
-    const msg = `data: ${JSON.stringify(line, (_k, v) => (typeof v === "bigint" ? v.toString() : v))}\n\n`;
-    this.history.push(msg);
-    if (this.history.length > 600) this.history.splice(0, this.history.length - 600);
+  push(line: Line) {
+    if (line.ts == null) line = { ts: new Date().toISOString(), ...line };
+    const msg = `data: ${ser(line)}\n\n`;
+    if (line.event === "wallet") {
+      this.wallets.set(String(line.agent), msg);
+    } else {
+      const key = keyOf(line);
+      if (key && this.seen.has(key)) return;
+      if (key) this.seen.add(key);
+      this.history.push({ t: tsOf(line), sig: key, msg });
+      if (this.history.length > KEEP_MAX + 500) this.prune();
+      if (this.file) appendFileSync(this.file, ser(line) + "\n");
+    }
     for (const c of this.clients) c.write(msg);
   }
 
+  /**
+   * Adds older events (a chain backfill) in time order. They are marked hist so the page
+   * shows them on the chart and in the feed without touching the units' current balances.
+   */
+  seed(lines: Line[]) {
+    const fresh: { t: number; sig?: string; msg: string }[] = [];
+    for (const raw of lines) {
+      const line: Line = { ...raw, hist: true };
+      const key = keyOf(line);
+      if (key && this.seen.has(key)) continue;
+      if (key) this.seen.add(key);
+      fresh.push({ t: tsOf(line), sig: key, msg: `data: ${ser(line)}\n\n` });
+    }
+    if (!fresh.length) return 0;
+    this.history = [...this.history, ...fresh].sort((a, b) => a.t - b.t);
+    this.prune();
+    this.save();
+    const batch = fresh.map((h) => h.msg).join("");
+    for (const c of this.clients) c.write(batch);
+    return fresh.length;
+  }
+
+  private prune() {
+    const cut = Date.now() - KEEP_MS;
+    let i = 0;
+    while (i < this.history.length && this.history[i]!.t < cut) i++;
+    i = Math.max(i, this.history.length - KEEP_MAX);
+    if (i > 0) for (const h of this.history.splice(0, i)) if (h.sig) this.seen.delete(h.sig);
+  }
+
+  private load() {
+    if (!this.file || !existsSync(this.file)) return;
+    try {
+      const cut = Date.now() - KEEP_MS;
+      for (const row of readFileSync(this.file, "utf8").split("\n")) {
+        if (!row) continue;
+        const line = JSON.parse(row) as Line;
+        const t = tsOf(line);
+        if (t < cut) continue;
+        // Balances come from a fresh wallet read on this start, so earlier fills are history only.
+        const msg = `data: ${ser({ ...line, hist: true })}\n\n`;
+        const key = keyOf(line);
+        if (key && this.seen.has(key)) continue;
+        if (key) this.seen.add(key);
+        this.history.push({ t, sig: key, msg });
+      }
+      this.history.sort((a, b) => a.t - b.t);
+      this.prune();
+      console.log(`  Dashboard: ${this.history.length} events loaded from ${this.file}`);
+    } catch (e) {
+      console.warn(`  Dashboard: could not read ${this.file}: ${(e as Error).message}`);
+    }
+  }
+
+  private save() {
+    if (!this.file) return;
+    try {
+      this.prune();
+      const rows = this.history.map((h) => h.msg.slice(6, -2) + "\n").join("");
+      writeFileSync(this.file, rows);
+    } catch (e) {
+      console.warn(`  Dashboard: could not write ${this.file}: ${(e as Error).message}`);
+    }
+  }
+
   close() {
+    this.save();
     for (const c of this.clients) c.end();
     this.server.close();
   }
@@ -164,6 +263,10 @@ a { color: inherit; }
 @media (max-width: 759px) { .mapbox { height: 300px; } }
 .clock .btn { pointer-events: auto; margin-top: 8px; }
 .pair { white-space: nowrap; }
+.rng { display: inline-flex; gap: 4px; pointer-events: auto; }
+.rng button { font: inherit; letter-spacing: 0.08em; color: var(--dim); background: rgba(0,0,0,0.6); border: 1px solid transparent; padding: 2px 6px; cursor: pointer; transition: color 700ms var(--ease), border-color 700ms var(--ease); }
+.rng button:hover { color: var(--fg); }
+.rng button.on { color: var(--sun); border-color: var(--sun); }
 @media (max-width: 767px) { .clock .pair, .clock .btn { display: none; } }
 
 /* units: a table on wide screens, stacked rows on narrow ones */
@@ -257,7 +360,8 @@ STATUS ...... <b id="mStatus">NOMINAL</b></pre>
     <div class="clock">
       <strong id="clock">T+0000</strong>
       <span class="legend" aria-hidden="true">[ ] HOLD   <span class="ice">[+] BUY</span>   <span class="sun">[-] SELL</span></span>
-      <span class="label pair"><b id="sym">-</b> MCAP &nbsp;<span id="chg"></span> <span class="dim">:: 30S</span></span>
+      <span class="label pair"><b id="sym">-</b> MCAP &nbsp;<span id="chg"></span> <span class="dim">:: <span id="rngLbl">30S</span></span></span>
+      <span class="rng" role="group" aria-label="Chart range"><button type="button" data-r="30S">30S</button><button type="button" data-r="5M">5M</button><button type="button" data-r="1H">1H</button></span>
       <a class="btn" id="mintLink" target="_blank" rel="noopener">Token</a>
     </div>
   </div>
@@ -319,7 +423,11 @@ const RING_ORDER = ["degen", "showman", "holder", "contrarian", "momentum", "sni
 let info = null, filter = "all";
 const agents = new Map();
 const prices = [], marks = [], ticks = [], mkt = [], early = [];
-let agentTrades = 0, lastPrice = 0, firstPrice = 0;
+let agentTrades = 0, lastPrice = 0, syncing = true;
+// Events carry their own time, so history replayed on connect lands where it happened.
+const tOf = (l) => Date.parse(l.ts) || Date.now();
+function ins(arr, item) { let i = arr.length; while (i > 0 && arr[i - 1].t > item.t) i--; arr.splice(i, 0, item); }
+function addPrice(t, p) { ins(prices, { t, p }); lastPrice = prices[prices.length - 1].p; }
 let pointer = null, hoverId = null, pulses = [], status = null, cardKey = "";
 const t0 = Date.now();
 let solUsd = null;
@@ -363,11 +471,15 @@ function add(cls, html, ts, kind) {
   const feed = $("feed");
   if (feed.firstElementChild?.classList.contains("empty")) feed.innerHTML = "";
   const d = document.createElement("div");
+  const t = Date.parse(ts) || Date.now();
   d.className = "ev " + cls;
   d.dataset.kind = kind;
+  d.dataset.t = String(t);
   d.innerHTML = '<span class="t">' + time(ts) + "</span><span>" + html + "</span>";
   if (filter !== "all" && kind !== filter) d.style.display = "none";
-  feed.prepend(d);
+  let at = feed.firstElementChild;
+  while (at && Number(at.dataset.t) > t) at = at.nextElementSibling;
+  feed.insertBefore(d, at);
   while (feed.children.length > 400) feed.lastChild.remove();
 }
 
@@ -381,7 +493,9 @@ function stats() {
   $("sTrades").textContent = String(agentTrades).padStart(2, "0");
   if (lastPrice) {
     $("mcap").textContent = money(mcapOf(lastPrice));
-    if (firstPrice) { const c = (lastPrice / firstPrice - 1) * 100; $("chg").innerHTML = '<span class="' + (c >= 0 ? "ice" : "sun") + '">' + (c >= 0 ? "+" : "") + c.toFixed(2) + "%</span>"; }
+    const from = Date.now() - SPAN; let ref = 0;
+    for (let i = prices.length - 1; i >= 0; i--) { ref = prices[i].p; if (prices[i].t < from) break; }
+    if (ref) { const c = (lastPrice / ref - 1) * 100; $("chg").innerHTML = '<span class="' + (c >= 0 ? "ice" : "sun") + '">' + (c >= 0 ? "+" : "") + c.toFixed(2) + "%</span>"; }
   }
   const s = Math.floor((Date.now() - t0) / 1000);
   $("clock").textContent = "T+" + String(Math.floor(s / 60)).padStart(4, "0");
@@ -437,7 +551,16 @@ function layout() {
 
 // ---------- hero: market cap candles and volume, last 30 seconds ----------
 const hv = $("hero"), hg = hv.getContext("2d");
-const SPAN = 30_000, BUCKET = 1000;
+// Chart ranges: span, candle size, and where the time labels go (seconds before now).
+const RANGES = {
+  "30S": { span: 30_000, bucket: 1000, ticks: [30, 20, 10, 0], unit: "1S" },
+  "5M": { span: 300_000, bucket: 10_000, ticks: [300, 240, 180, 120, 60, 0], unit: "10S" },
+  "1H": { span: 3_600_000, bucket: 60_000, ticks: [3600, 2700, 1800, 900, 0], unit: "1M" },
+};
+let range = "30S";
+try { const r = localStorage.getItem("hs-range"); if (r && RANGES[r]) range = r; } catch (e) {}
+let SPAN = RANGES[range].span, BUCKET = RANGES[range].bucket;
+const tickLabel = (s) => s === 0 ? "NOW" : s < 60 ? "-" + s + "S" : "-" + Math.round(s / 60) + "M";
 let HW = 0, HH = 0, vLo = 0, vHi = 0, vMax = 0;
 function drawHero() {
   if (!HW) return;
@@ -452,7 +575,8 @@ function drawHero() {
   const bw = (x1 - x0) * BUCKET / SPAN, w = Math.max(3, Math.round(bw * 0.56)), cell = HW < 700 ? 2 : 3;
   g.font = "10px " + MONO; g.fillStyle = C.dim; g.globalAlpha = 1;
   g.textBaseline = "top";
-  for (let s = 30; s >= 0; s -= 10) { g.textAlign = s === 30 ? "left" : s === 0 ? "right" : "center"; g.fillText(s ? "-" + s + "S" : "NOW", x0 + (1 - s / 30) * (x1 - x0), y1 + 12); }
+  const R = RANGES[range], top = R.ticks[0];
+  for (const s of R.ticks) { g.textAlign = s === top ? "left" : s === 0 ? "right" : "center"; g.fillText(tickLabel(s), x0 + (1 - s / top) * (x1 - x0), y1 + 12); }
   g.strokeStyle = C.dim; g.setLineDash([2, 5]); g.beginPath(); g.moveTo(x0, y1 + 0.5); g.lineTo(x1, y1 + 0.5); g.stroke(); g.setLineDash([]);
   // one-second buckets: OHLC from trade prices, volume from market flow
   const b0 = Math.floor(from / BUCKET) * BUCKET;
@@ -476,7 +600,7 @@ function drawHero() {
   g.textAlign = "right"; g.textBaseline = "middle"; g.fillStyle = C.dim;
   for (let y = y0; y <= cBot + 0.5; y += G) g.fillText(money(vLo + ((cBot - y) / (cBot - cTop)) * (vHi - vLo)), HW - padR - 10, y);
   g.fillText("VOL " + (vMax ? vMax.toFixed(2) : "0") + " SOL", HW - padR - 10, y1 - vh);
-  g.textAlign = "left"; g.fillText("VOL / 1S", x0, y1 - vh - 8);
+  g.textAlign = "left"; g.fillText("VOL / " + RANGES[range].unit, x0, y1 - vh - 8);
   // volume: dithered bars, buys under sells
   const vbar = (x, yTop, yBot, col) => {
     g.fillStyle = col;
@@ -498,7 +622,7 @@ function drawHero() {
   }
   // unit trades: a marker, brackets, and a call sign on a leader
   let slot = 0;
-  const shown = marks.filter((m) => m.t >= from), named = HW < 700 ? 3 : 12;
+  const shown = marks.filter((m) => m.t >= from), named = HW < 700 ? 3 : range === "30S" ? 12 : 6;
   shown.forEach((m, mi) => {
     const label = mi >= shown.length - named;
     const x = X(m.t), y = Math.max(cTop, Math.min(cBot, Y(mcapOf(m.p)))), col = m.side === "buy" ? C.ice : C.sun, age = (now - m.t) / 1000;
@@ -654,7 +778,10 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 function setRunning(on) { on = on && !reduce && !document.hidden; if (on && !running) { running = true; last = performance.now(); requestAnimationFrame(frame); } else if (!on) running = false; }
-function trim() { const cut = Date.now() - 120_000; for (const a of [prices, marks, ticks]) while (a.length && a[0].t < cut) a.shift(); }
+function trim() {
+  const cut = Date.now() - 61 * 60_000;
+  for (const a of [prices, marks, ticks]) { let i = 0; while (i < a.length - 1 && a[i].t < cut) i++; if (i) a.splice(0, i); }
+}
 
 function onEvent(l) {
   const ts = l.ts;
@@ -665,18 +792,20 @@ function onEvent(l) {
     }
     case "fill": {
       const a = agents.get(l.agent);
-      const buy = l.side === "buy";
+      const buy = l.side === "buy", t = tOf(l);
       agentTrades++;
-      if (a) {
+      // Past fills (hist) go on the chart and in the feed; balances already include them.
+      if (a && !l.hist) {
         if (buy) { a.cash -= Number(l.sol); a.tokens += Number(l.tokens); } else { a.cash += Number(l.sol); a.tokens = Math.max(0, a.tokens - Number(l.tokens)); }
         a.last = (buy ? "bought " : "sold ") + fmt(l.sol) + " SOL" + (l.reason && l.reason !== "on-chain" ? " · " + l.reason : "");
         a.flash = buy ? "buy" : "sell"; a.flashT = mapT;
         clearTimeout(a.flashTimer); a.flashTimer = setTimeout(() => { a.flash = null; renderAgents(); if (!running) drawMap(); }, 2400);
       }
-      if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; marks.push({ t: Date.now(), p: lastPrice, side: l.side, agent: l.agent, sol: Number(l.sol) }); prices.push({ t: Date.now(), p: lastPrice }); }
+      if (l.priceSol) { const p = Number(l.priceSol); ins(marks, { t, p, side: l.side, agent: l.agent, sol: Number(l.sol) }); addPrice(t, p); }
       const link = l.sig && l.sig !== "paper" ? ' <a href="https://solscan.io/tx/' + l.sig + '" target="_blank" rel="noopener">tx ↗</a>' : ' <span class="dim">paper</span>';
       add("swarm", '<span class="who">' + esc(l.agent) + '</span> <span class="k ' + (buy ? "buy" : "sell") + '">' + (buy ? "buy" : "sell") + "</span> " + fmt(l.sol) + " SOL <span class='dim'>" + big(Number(l.tokens)) + " " + esc(sym(l.mint)) + (l.reason && l.reason !== "on-chain" ? " · " + esc(l.reason) : "") + "</span>" + link, ts, "swarm");
-      renderAgents(); stats(); return;
+      if (!syncing) { renderAgents(); stats(); }
+      return;
     }
     case "refused": { const a = agents.get(l.agent); if (a) { a.last = "skip: " + l.why; renderAgents(); } return; }
     case "signal": {
@@ -686,19 +815,21 @@ function onEvent(l) {
     }
     case "flow": {
       if (l.kind !== "buy" && l.kind !== "sell") return;
-      const buy = l.kind === "buy";
-      if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; prices.push({ t: Date.now(), p: lastPrice }); ticks.push({ t: Date.now(), p: lastPrice, side: l.kind, sol: Number(l.sol) }); }
-      mkt.push({ t: Date.now(), s: l.kind, sol: Number(l.sol) || 0 });
+      const buy = l.kind === "buy", t = tOf(l);
+      if (l.priceSol) { const p = Number(l.priceSol); addPrice(t, p); ins(ticks, { t, p, side: l.kind, sol: Number(l.sol) }); }
+      ins(mkt, { t, s: l.kind, sol: Number(l.sol) || 0 });
       if (l.seenEarlyMs != null && l.seenEarlyMs >= 0) early.push(l.seenEarlyMs);
       const e = l.seenEarlyMs != null && l.seenEarlyMs >= 0 ? ' <span class="early">⚡' + l.seenEarlyMs + "ms</span>" : "";
       add("market", '<span class="k ' + (buy ? "buy" : "sell") + '">' + (buy ? "buy" : "sell") + "</span> " + fmt(l.sol) + " SOL <span class='dim'>" + big(Number(l.tokens)) + " · " + short(l.owner) + "</span>" + e, ts, "market");
-      stats(); return;
+      if (!syncing) stats();
+      return;
     }
     case "pending": {
       if (l.kind !== "buy" && l.kind !== "sell") return;
       add("market", '<span class="early">⏳ incoming</span> <span class="k ' + l.kind + '">' + l.kind + '</span> <span class="dim">' + short(l.owner) + " · " + esc(l.venue) + " · not executed yet</span>", ts, "early");
       return;
     }
+    case "synced": { syncing = false; renderAgents(); stats(); drawHero(); return; }
     case "solusd": { solUsd = Number(l.usd) > 0 ? Number(l.usd) : null; stats(); return; }
     case "task_error": { const a = agents.get(l.agent); if (a) { a.last = "error: " + String(l.error).slice(0, 80); renderAgents(); } return; }
   }
@@ -709,6 +840,9 @@ function connect() {
   es.addEventListener("info", (m) => {
     info = JSON.parse(m.data);
     agents.clear();
+    // A reconnect replays the whole history, so start the chart and counters clean.
+    for (const a of [prices, marks, ticks, mkt, early]) a.length = 0;
+    agentTrades = 0; lastPrice = 0; syncing = true; vHi = 0;
     for (const a of info.agents) agents.set(a.id, { ...a, cash: a.bankrollSol, start: a.bankrollSol, tokens: 0, last: "" });
     orbitSetup();
     const t = info.tokens[0];
@@ -723,6 +857,15 @@ function connect() {
   es.onopen = () => { $("conn").classList.add("on"); $("connTxt").textContent = "live"; };
   es.onerror = () => { $("conn").classList.remove("on"); $("connTxt").textContent = "reconnecting"; };
 }
+function setRange(r) {
+  range = r; SPAN = RANGES[r].span; BUCKET = RANGES[r].bucket; vHi = 0;
+  document.querySelectorAll(".rng button").forEach((b) => { b.classList.toggle("on", b.dataset.r === r); b.setAttribute("aria-pressed", String(b.dataset.r === r)); });
+  $("rngLbl").textContent = r;
+  $("hero").setAttribute("aria-label", "Market cap and volume over the last " + (r === "30S" ? "30 seconds" : r === "5M" ? "5 minutes" : "hour") + ", with every unit trade marked.");
+  try { localStorage.setItem("hs-range", r); } catch (e) {}
+  stats(); drawHero();
+}
+document.querySelectorAll(".rng button").forEach((b) => b.onclick = () => setRange(b.dataset.r));
 document.querySelectorAll(".tabs .btn").forEach((b) => b.onclick = () => {
   document.querySelectorAll(".tabs .btn").forEach((x) => x.classList.toggle("on", x === b));
   filter = b.dataset.f;
@@ -730,7 +873,7 @@ document.querySelectorAll(".tabs .btn").forEach((b) => b.onclick = () => {
 });
 setInterval(() => { stats(); trim(); if (!running) drawHero(); }, 1000);
 if ("ResizeObserver" in window) { const ro = new ResizeObserver(resize); ro.observe(consoleEl); ro.observe(mapEl); } else addEventListener("resize", resize);
-layout(); resize();
+layout(); resize(); setRange(range);
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { drawHero(); drawMap(); });
 if ("IntersectionObserver" in window) {
   new IntersectionObserver((es) => { heroVis = es[0].isIntersecting; }).observe(consoleEl);
