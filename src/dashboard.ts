@@ -340,7 +340,7 @@ a { color: inherit; }
 .block { padding: 32px 0; border-bottom: 1px solid var(--line); }
 .block:last-child { border-bottom: 0; }
 .head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; min-height: 34px; }
-#hero { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#hero { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
 .mapbox { position: relative; height: 360px; overflow: hidden; }
 #swarm { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 @media (max-width: 759px) { .mapbox { height: 300px; } }
@@ -350,7 +350,8 @@ a { color: inherit; }
 .rng button { font: inherit; letter-spacing: 0.08em; color: var(--dim); background: rgba(0,0,0,0.6); border: 1px solid transparent; padding: 2px 6px; cursor: pointer; transition: color 700ms var(--ease), border-color 700ms var(--ease); }
 .rng button:hover { color: var(--fg); }
 .rng button.on { color: var(--sun); border-color: var(--sun); }
-@media (max-width: 767px) { .rng { position: absolute; left: max(var(--padl), env(safe-area-inset-left, 0px)); top: 212px; margin-left: -6px; } }
+.zoom { margin-top: 2px; }
+@media (max-width: 767px) { .rng { position: absolute; left: max(var(--padl), env(safe-area-inset-left, 0px)); top: 212px; margin-left: -6px; } .rng.zoom { top: 244px; margin-top: 0; } }
 @media (max-width: 767px) { .clock .pair, .clock .btn { display: none; } }
 
 /* units: a table on wide screens, stacked rows on narrow ones */
@@ -446,6 +447,7 @@ STATUS ...... <b id="mStatus">NOMINAL</b></pre>
       <span class="legend" aria-hidden="true">[ ] HOLD   <span class="ice">[+] BUY</span>   <span class="sun">[-] SELL</span></span>
       <span class="label pair"><b id="sym">-</b> MCAP &nbsp;<span id="chg"></span> <span class="dim">:: <span id="rngLbl">30S</span></span></span>
       <span class="rng" role="group" aria-label="Chart range"><button type="button" data-r="30S">30S</button><button type="button" data-r="5M">5M</button><button type="button" data-r="1H">1H</button><button type="button" data-r="24H">24H</button><button type="button" data-r="ALL">ALL</button></span>
+      <span class="rng zoom" role="group" aria-label="Chart zoom"><button type="button" id="zOut" aria-label="Zoom out">&minus;</button><button type="button" id="zIn" aria-label="Zoom in">+</button><button type="button" id="zReset">RESET</button><button type="button" id="goLive" class="on" hidden>LIVE &rsaquo;</button></span>
       <a class="btn" id="mintLink" target="_blank" rel="noopener">Token</a>
     </div>
   </div>
@@ -680,6 +682,10 @@ try { const r = localStorage.getItem("hs-range"); if (r && RANGES[r]) range = r;
 let SPAN = RANGES[range].span, BUCKET = RANGES[range].bucket;
 const tickLabel = (s) => s === 0 ? "NOW" : s < 60 ? "-" + s + "S" : s < 7200 ? "-" + Math.round(s / 60) + "M" : s < 172800 ? "-" + Math.round(s / 3600) + "H" : "-" + Math.round(s / 86400) + "D";
 let HW = 0, HH = 0, vLo = 0, vHi = 0, vMax = 0;
+// Chart view: follow live or a fixed right edge, auto or manual price scale, volume pane share.
+let follow = true, rightT = 0, yAuto = true, yLo = 0, yHi = 0, volFrac = 0.26, hover = null, geo = null, heroBars = [];
+const unitOf = (b) => (SIZES.find((z) => z[0] === b) || [0, Math.round(b / 1000) + "S"])[1];
+const clock = (t) => { const d = new Date(t); return d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: SPAN < 600_000 ? "2-digit" : undefined }); };
 function drawHero() {
   if (!HW) return;
   const g = hg;
@@ -687,20 +693,24 @@ function drawHero() {
   crosses(g, HW, HH, padL, 96);
   starfield(g, HW, HH);
   const x0 = padL, x1 = HW - padR - G, y0 = 96 + 2 * G, y1 = 96 + rows * G;
-  const vh = Math.round((y1 - y0) * 0.26), cTop = y0, cBot = y1 - vh - 16;
-  const now = Date.now(), from = now - SPAN;
+  const vh = Math.round((y1 - y0) * volFrac), cTop = y0, cBot = y1 - vh - 16;
+  const now = Date.now(), right = follow ? now : rightT, from = right - SPAN;
   const X = (t) => x0 + ((t - from) / SPAN) * (x1 - x0);
   const bw = (x1 - x0) * BUCKET / SPAN, w = Math.max(3, Math.round(bw * 0.56)), cell = HW < 700 ? 2 : 3;
   g.font = "10px " + MONO; g.fillStyle = C.dim; g.globalAlpha = 1;
   g.textBaseline = "top";
-  const R = RANGES[range], top = R.ticks[0];
-  for (const s of R.ticks) { g.textAlign = s === top ? "left" : s === 0 ? "right" : "center"; g.fillText(tickLabel(s), x0 + (1 - s / top) * (x1 - x0), y1 + 12); }
+  // time labels: offsets from now while following, clock times once panned back
+  for (let i = 0; i <= 4; i++) {
+    const t = from + (i / 4) * SPAN;
+    g.textAlign = i === 0 ? "left" : i === 4 ? "right" : "center";
+    g.fillText(follow ? tickLabel(Math.round((now - t) / 1000)) : clock(t), x0 + (i / 4) * (x1 - x0), y1 + 12);
+  }
   g.strokeStyle = C.dim; g.setLineDash([2, 5]); g.beginPath(); g.moveTo(x0, y1 + 0.5); g.lineTo(x1, y1 + 0.5); g.stroke(); g.setLineDash([]);
   // one-second buckets: OHLC from trade prices, volume from market flow
   const b0 = Math.floor(from / BUCKET) * BUCKET;
   let pi = lb(prices, b0), ti = lb(ticks, b0), prev = pi > 0 ? prices[pi - 1].p : null;
   const bars = [];
-  for (let s = b0; s <= now; s += BUCKET) {
+  for (let s = b0; s <= right; s += BUCKET) {
     let o = prev, c = prev, h = prev, l = prev, n = 0, buy = 0, sell = 0;
     while (pi < prices.length && prices[pi].t < s + BUCKET) { const p = prices[pi++].p; if (!n) { o = prev ?? p; h = Math.max(o, p); l = Math.min(o, p); } h = Math.max(h, p); l = Math.min(l, p); c = p; n++; }
     while (ti < ticks.length && ticks[ti].t < s + BUCKET) { const k = ticks[ti++]; if (k.side === "buy") buy += k.sol; else sell += k.sol; }
@@ -711,13 +721,15 @@ function drawHero() {
   for (const b of bars) { lo = Math.min(lo, b.l); hi = Math.max(hi, b.h); vm = Math.max(vm, b.buy + b.sell); }
   const pad = (hi - lo) * 0.2 || hi * 0.004;
   lo = Math.max(lo - pad, lo * 0.5) + pad; // never let the padding take the scale below zero
-  if (!vHi) { vLo = lo - pad; vHi = hi + pad; vMax = vm; } else { vLo += (lo - pad - vLo) * 0.08; vHi += (hi + pad - vHi) * 0.08; vMax += (vm - vMax) * 0.08; }
+  if (!yAuto) { vLo = yLo; vHi = yHi; vMax = vMax ? vMax + (vm - vMax) * 0.2 : vm; }
+  else if (!vHi) { vLo = lo - pad; vHi = hi + pad; vMax = vm; } else { vLo += (lo - pad - vLo) * 0.08; vHi += (hi + pad - vHi) * 0.08; vMax += (vm - vMax) * 0.08; }
+  geo = { x0, x1, cTop, cBot, y1, vh, from, right, b0 }; heroBars = bars;
   const Y = (v) => cBot - ((v - vLo) / (vHi - vLo)) * (cBot - cTop);
   // market cap scale on the grid rows, volume scale at the top of its band
   g.textAlign = "right"; g.textBaseline = "middle"; g.fillStyle = C.dim;
   for (let y = y0; y <= cBot + 0.5; y += G) g.fillText(money(vLo + ((cBot - y) / (cBot - cTop)) * (vHi - vLo)), HW - padR - 10, y);
   g.fillText("VOL " + (vMax ? vMax.toFixed(2) : "0") + " SOL", HW - padR - 10, y1 - vh);
-  g.textAlign = "left"; g.fillText("VOL / " + RANGES[range].unit, x0, y1 - vh - 8);
+  g.textAlign = "left"; g.fillText("VOL / " + unitOf(BUCKET), x0, y1 - vh - 8);
   // volume: dithered bars, buys under sells
   const vbar = (x, yTop, yBot, col) => {
     g.fillStyle = col;
@@ -728,18 +740,20 @@ function drawHero() {
     const xl = Math.round(X(b.s + BUCKET / 2) - w / 2), hb = (b.buy / vMax) * vh, hs = (b.sell / vMax) * vh;
     vbar(xl, y1 - hb, y1, C.ice); vbar(xl, y1 - hb - hs, y1 - hb, C.sun);
   }
-  // candles: filled bodies, one pixel wicks; a quiet second is a dim tick
+  // candles: filled bodies, one pixel wicks; a quiet second is a dim tick (clipped to the plot when stretched)
+  g.save(); g.beginPath(); g.rect(x0 - 4, cTop - 6, x1 - x0 + 10, cBot - cTop + 12); g.clip();
   for (const b of bars) {
-    const xc = Math.round(X(b.s + BUCKET / 2)); if (xc - w / 2 < x0) continue;
+    const xc = Math.round(X(b.s + BUCKET / 2)); if (xc - w / 2 < x0 || xc + w / 2 > x1 + 2) continue;
     if (!b.n) { g.fillStyle = C.dim; g.fillRect(xc - Math.floor(w / 2), Math.round(Y(b.c)), w, 1); continue; }
     const up = b.c >= b.o, col = up ? C.ice : C.sun, top = Math.round(Y(Math.max(b.o, b.c))), bot = Math.round(Y(Math.min(b.o, b.c)));
     g.fillStyle = col;
     g.fillRect(xc, Math.round(Y(b.h)), 1, Math.max(1, Math.round(Y(b.l)) - Math.round(Y(b.h))));
     g.fillRect(xc - Math.floor(w / 2), top, w, Math.max(2, bot - top));
   }
+  g.restore();
   // unit trades: a marker, brackets, and a call sign on a leader
   let slot = 0;
-  const shown = marks.filter((m) => m.t >= from), named = HW < 700 ? 3 : range === "30S" ? 12 : 6;
+  const shown = marks.filter((m) => m.t >= from && m.t <= right), named = HW < 700 ? 3 : range === "30S" ? 12 : 6;
   shown.forEach((m, mi) => {
     const label = mi >= shown.length - named;
     const x = X(m.t), y = Math.max(cTop, Math.min(cBot, Y(mcapOf(m.p)))), col = m.side === "buy" ? C.ice : C.sun, age = (now - m.t) / 1000;
@@ -766,6 +780,7 @@ function drawHero() {
   });
   // the live head: a small dithered sun on the last close, its market cap carried to the scale
   const last = bars[bars.length - 1].c, hy = Math.round(Y(last));
+  if (follow && hy >= cTop - 4 && hy <= cBot + 4) {
   g.strokeStyle = C.sun; g.globalAlpha = 0.5; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(x1 + 8, hy + 0.5); g.lineTo(HW - padR - 76, hy + 0.5); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
   ditherSun(g, x1 + 8, hy, 4, 20, 3, false, mapT); ditherSun(g, x1 + 8, hy, 4, 20, 3, true, mapT);
   const lbl = money(last);
@@ -773,7 +788,103 @@ function drawHero() {
   g.fillStyle = C.bg; g.fillRect(HW - padR - lw - 8, hy - 8, lw + 8, 16);
   g.strokeStyle = C.sun; g.strokeRect(HW - padR - lw - 8 + 0.5, hy - 8 + 0.5, lw + 7, 15);
   g.fillStyle = C.sun; g.textAlign = "right"; g.textBaseline = "middle"; g.fillText(lbl, HW - padR - 4, hy + 0.5);
+  }
+  // crosshair: dashed guides, the value and time on the axes, and the candle under it
+  if (hover && hover.x >= x0 && hover.x <= x1 && hover.y >= cTop && hover.y <= y1) {
+    const hx = Math.round(hover.x) + 0.5, hyy = Math.round(hover.y) + 0.5, t = from + ((hover.x - x0) / (x1 - x0)) * SPAN;
+    g.strokeStyle = C.muted; g.globalAlpha = 0.6; g.setLineDash([2, 4]); g.beginPath();
+    g.moveTo(hx, cTop); g.lineTo(hx, y1); if (hover.y <= cBot) { g.moveTo(x0, hyy); g.lineTo(x1, hyy); } g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    g.font = "10px " + MONO; g.textBaseline = "middle";
+    const box = (txt, x, y, align) => { const tw = g.measureText(txt).width, bx = align === "right" ? x - tw - 8 : align === "center" ? x - tw / 2 - 4 : x; g.fillStyle = C.bg; g.fillRect(bx, y - 8, tw + 8, 16); g.strokeStyle = C.muted; g.strokeRect(bx + 0.5, y - 7.5, tw + 7, 15); g.fillStyle = C.fg; g.textAlign = "left"; g.fillText(txt, bx + 4, y + 0.5); };
+    if (hover.y <= cBot) box(money(vLo + ((cBot - hover.y) / (cBot - cTop)) * (vHi - vLo)), HW - padR, hyy, "right");
+    box(clock(t), Math.max(x0 + 40, Math.min(x1 - 40, hx)), y1 + 18, "center");
+    const bs = Math.floor(t / BUCKET) * BUCKET, b = bars[lb(bars.map((q) => ({ t: q.s })), bs)];
+    if (b && b.s === bs) {
+      const up = b.c >= b.o, parts = [["O", money(b.o)], ["H", money(b.h)], ["L", money(b.l)], ["C", money(b.c)], ["VOL", (b.buy + b.sell).toFixed(2) + " SOL"]];
+      let x = x0; g.textAlign = "left";
+      for (const [k, v] of parts) { g.fillStyle = C.dim; g.fillText(k, x, cTop - 14); x += g.measureText(k + " ").width; g.fillStyle = k === "VOL" ? C.fg : up ? C.ice : C.sun; g.fillText(v, x, cTop - 14); x += g.measureText(v + "   ").width; }
+    }
+  }
 }
+
+// ---------- chart controls: drag to pan, ctrl/pinch/buttons to zoom, drag the scale to stretch ----------
+function setCustom() {
+  if (range === "CUSTOM") return;
+  range = "CUSTOM";
+  document.querySelectorAll(".rng button[data-r]").forEach((b) => { b.classList.remove("on"); b.setAttribute("aria-pressed", "false"); });
+}
+function syncLive() { $("goLive").hidden = follow; $("rngLbl").textContent = range === "CUSTOM" ? unitOf(BUCKET) : range; }
+function zoom(f, ax) {
+  if (!geo) return;
+  const now = Date.now(), { x0, x1 } = geo, right = follow ? now : rightT, from = right - SPAN;
+  const frac = ax == null ? 1 : Math.max(0, Math.min(1, (ax - x0) / (x1 - x0))), tA = from + frac * SPAN;
+  const first = prices.length ? prices[0].t : now - 3_600_000;
+  let span = Math.max(BUCKET * 8, Math.min(SPAN * f, Math.max(3_600_000, (now - first) * 1.5)));
+  let i = SIZES.findIndex((z) => z[0] === BUCKET); if (i < 0) i = 2;
+  while (span / SIZES[i][0] > 200 && i < SIZES.length - 1) i++;
+  while (span / SIZES[i][0] < 16 && i > 0) i--;
+  BUCKET = SIZES[i][0]; span = Math.max(BUCKET * 8, span);
+  const nr = tA + (1 - frac) * span;
+  follow = nr >= now - BUCKET; rightT = follow ? now : nr; SPAN = span;
+  setCustom(); syncLive(); stats(); drawHero();
+}
+function resetView() { follow = true; yAuto = true; vHi = 0; volFrac = 0.26; setRange(range === "CUSTOM" ? "ALL" : range); }
+let drag = null;
+const pinch = new Map();
+function zoneAt(x, y) {
+  if (!geo) return null;
+  const { x0, x1, cTop, y1, vh } = geo, dv = y1 - vh - 8;
+  if (x >= x0 && x <= x1 && Math.abs(y - dv) < 7) return "vol";
+  if (x > x1 && y >= cTop && y <= y1) return "scale";
+  if (x >= x0 && x <= x1 && y >= cTop - 24 && y <= y1 + 24) return "pan";
+  return null;
+}
+const heroPt = (e) => { const r = hv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+hv.addEventListener("pointerdown", (e) => {
+  const p = heroPt(e), z = zoneAt(p.x, p.y);
+  if (e.pointerType === "touch") { pinch.set(e.pointerId, p); if (pinch.size === 2) { const [a, b] = [...pinch.values()]; drag = { kind: "pinch", d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2 }; return; } }
+  if (!z) return;
+  hv.setPointerCapture(e.pointerId);
+  if (z === "scale" && yAuto) { yAuto = false; yLo = vLo; yHi = vHi; }
+  drag = { kind: z, x: p.x, y: p.y, right: follow ? Date.now() : rightT, lo: yAuto ? vLo : yLo, hi: yAuto ? vHi : yHi, frac: volFrac };
+});
+hv.addEventListener("pointermove", (e) => {
+  const p = heroPt(e);
+  if (e.pointerType === "touch" && pinch.has(e.pointerId)) pinch.set(e.pointerId, p);
+  hover = e.pointerType === "touch" ? null : p;
+  if (!drag) { const z = zoneAt(p.x, p.y); hv.style.cursor = z === "vol" ? "row-resize" : z === "scale" ? "ns-resize" : z === "pan" ? "crosshair" : ""; if (!running) drawHero(); return; }
+  const g = geo, w = g.x1 - g.x0, hgt = g.cBot - g.cTop;
+  if (drag.kind === "pinch" && pinch.size === 2) { const [a, b] = [...pinch.values()], d = Math.hypot(a.x - b.x, a.y - b.y); if (d > 10) { zoom(drag.d / d, drag.mx); drag.d = d; } return; }
+  if (drag.kind === "pan") {
+    hv.style.cursor = "grabbing";
+    const nr = drag.right - ((p.x - drag.x) / w) * SPAN, now = Date.now();
+    follow = nr >= now; rightT = follow ? now : nr;
+    if (!yAuto) { const dv = ((p.y - drag.y) / hgt) * (drag.hi - drag.lo); yLo = drag.lo + dv; yHi = drag.hi + dv; }
+    setCustom(); syncLive();
+  } else if (drag.kind === "scale") {
+    const f = Math.exp((p.y - drag.y) * 0.006), mid = (drag.lo + drag.hi) / 2, half = ((drag.hi - drag.lo) / 2) * f;
+    yLo = mid - half; yHi = mid + half;
+  } else if (drag.kind === "vol") {
+    volFrac = Math.max(0.08, Math.min(0.6, (g.y1 - p.y) / (g.y1 - g.cTop)));
+  }
+  if (!running) drawHero();
+});
+const endDrag = (e) => { pinch.delete(e.pointerId); if (drag && (drag.kind !== "pinch" || pinch.size < 2)) drag = null; hv.style.cursor = ""; };
+hv.addEventListener("pointerup", endDrag);
+hv.addEventListener("pointercancel", endDrag);
+hv.addEventListener("pointerleave", () => { hover = null; if (!running) drawHero(); });
+hv.addEventListener("dblclick", (e) => { const p = heroPt(e); if (zoneAt(p.x, p.y) === "scale") { yAuto = true; vHi = 0; drawHero(); } else resetView(); });
+// Plain scrolling keeps scrolling the page; pinch on a trackpad (ctrlKey) or ctrl/cmd + wheel zooms, sideways scroll pans.
+hv.addEventListener("wheel", (e) => {
+  if (!geo) return;
+  const p = heroPt(e);
+  if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoom(Math.exp(e.deltaY * 0.01), p.x); }
+  else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && zoneAt(p.x, p.y) === "pan") {
+    e.preventDefault();
+    const now = Date.now(), nr = (follow ? now : rightT) + (e.deltaX / (geo.x1 - geo.x0)) * SPAN;
+    follow = nr >= now; rightT = follow ? now : nr; setCustom(); syncLive(); if (!running) drawHero();
+  }
+}, { passive: false });
 
 // ---------- swarm map ----------
 const cv = $("swarm"), ctx = cv.getContext("2d"), card = $("callout");
@@ -1006,13 +1117,17 @@ function connect() {
 }
 function setRange(r) {
   range = r; fitAll(); SPAN = RANGES[r].span; BUCKET = RANGES[r].bucket; vHi = 0;
-  document.querySelectorAll(".rng button").forEach((b) => { b.classList.toggle("on", b.dataset.r === r); b.setAttribute("aria-pressed", String(b.dataset.r === r)); });
+  document.querySelectorAll(".rng button[data-r]").forEach((b) => { b.classList.toggle("on", b.dataset.r === r); b.setAttribute("aria-pressed", String(b.dataset.r === r)); });
   $("rngLbl").textContent = r;
   $("hero").setAttribute("aria-label", "Market cap and volume " + (r === "30S" ? "over the last 30 seconds" : r === "5M" ? "over the last 5 minutes" : r === "1H" ? "over the last hour" : r === "24H" ? "over the last 24 hours" : "since launch") + ", with every unit trade marked.");
   try { localStorage.setItem("hs-range", r); } catch (e) {}
-  stats(); drawHero();
+  syncLive(); stats(); drawHero();
 }
-document.querySelectorAll(".rng button").forEach((b) => b.onclick = () => setRange(b.dataset.r));
+document.querySelectorAll(".rng button[data-r]").forEach((b) => b.onclick = () => { follow = true; yAuto = true; setRange(b.dataset.r); });
+$("zIn").onclick = () => zoom(1 / 1.6, null);
+$("zOut").onclick = () => zoom(1.6, null);
+$("zReset").onclick = resetView;
+$("goLive").onclick = () => { follow = true; syncLive(); drawHero(); };
 document.querySelectorAll(".tabs .btn").forEach((b) => b.onclick = () => {
   document.querySelectorAll(".tabs .btn").forEach((x) => x.classList.toggle("on", x === b));
   filter = b.dataset.f;
