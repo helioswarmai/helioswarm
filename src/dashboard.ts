@@ -1,6 +1,8 @@
 // Live demo dashboard: `--dashboard [port]` on a trading run or a watch serves a page at
 // http://localhost:<port> that shows the agents, their wallets and trades, the market feed,
 // early (pre-execution) warnings and signals as they happen. Server-sent events, no deps.
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { createServer, type ServerResponse } from "node:http";
 
 export interface DashboardAgent {
@@ -13,24 +15,68 @@ export interface DashboardAgent {
 export interface DashboardInfo {
   title: string;
   mode: "live" | "paper" | "watch";
-  tokens: { mint: string; symbol: string }[];
+  /** supply: whole tokens, for market cap (the page assumes 1B, the pump.fun mint, when absent). */
+  tokens: { mint: string; symbol: string; supply?: number }[];
   agents: DashboardAgent[];
 }
 
+/** Every event from the last hour is replayed to a new visitor; older trades come from /trades. */
+const RECENT_MS = 60 * 60_000;
+/** Trades (market flow and unit fills) are kept for the token's whole life, up to this many. */
+const KEEP_TRADES = 250_000;
+
+type Line = Record<string, unknown>;
+type Entry = { t: number; key?: string; line: Line; msg: string };
+const ser = (line: Line) => JSON.stringify(line, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+/** One entry per transaction and wallet, so a trade seen live and again in a backfill shows once. */
+const keyOf = (line: Line) => (line.sig ? `${line.event}|${line.sig}|${line.owner ?? line.agent ?? ""}` : undefined);
+const tsOf = (line: Line) => Date.parse(String(line.ts ?? "")) || Date.now();
+const isTrade = (line: Line) => line.event === "flow" || line.event === "fill";
+const entry = (line: Line): Entry => ({ t: tsOf(line), key: keyOf(line), line, msg: `data: ${ser(line)}\n\n` });
+/** First index whose time is at or after t. */
+const lower = (a: Entry[], t: number) => { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m]!.t < t) lo = m + 1; else hi = m; } return lo; };
+
 export class Dashboard {
   private clients = new Set<ServerResponse>();
-  private history: string[] = [];
+  /** Every trade, oldest first. */
+  private trades: Entry[] = [];
+  /** Everything else (signals, pending, errors) from the last hour. */
+  private recent: Entry[] = [];
+  private seen = new Set<string>();
+  /** Transaction signatures already held, so a backfill knows where to stop. */
+  private sigs = new Set<string>();
+  /** Latest wallet line per agent, replayed before the history so balances are right. */
+  private wallets = new Map<string, string>();
   private server;
+  private solUsd: number | null = null;
+  private file: string | null;
+  private tradesBody: { n: number; at: number; body: Buffer } | null = null;
+  private dirty = false;
 
-  constructor(private info: DashboardInfo, port: number) {
+  constructor(private info: DashboardInfo, port: number, opts: { historyFile?: string | null } = {}) {
+    this.file = opts.historyFile === undefined ? process.env.DASHBOARD_HISTORY_FILE || null : opts.historyFile;
+    this.load();
     this.server = createServer((req, res) => {
-      const path = (req.url ?? "/").split("?")[0]!;
+      const url = new URL(req.url ?? "/", "http://x");
+      const path = url.pathname;
       if (path.endsWith("/events")) {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
         res.write(`event: info\ndata: ${JSON.stringify(this.info)}\n\n`);
-        for (const h of this.history) res.write(h);
+        if (this.solUsd) res.write(`data: ${JSON.stringify({ event: "solusd", usd: this.solUsd })}\n\n`);
+        for (const w of this.wallets.values()) res.write(w);
+        const since = Date.now() - RECENT_MS;
+        res.write(this.replay(since));
+        res.write(`data: ${JSON.stringify({ event: "synced", since, total: this.trades.length })}\n\n`);
         this.clients.add(res);
         req.on("close", () => this.clients.delete(res));
+        return;
+      }
+      if (path.endsWith("/trades")) {
+        const before = Number(url.searchParams.get("before")) || Date.now();
+        const body = this.tradesJson(before);
+        const gz = /\bgzip\b/.test(String(req.headers["accept-encoding"] ?? ""));
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-cache", ...(gz ? { "content-encoding": "gzip" } : {}) });
+        res.end(gz ? gzipSync(body) : body);
         return;
       }
       if (path === "/" || path.endsWith("/") || path.endsWith("/live")) {
@@ -45,16 +91,173 @@ export class Dashboard {
       for (const c of this.clients) c.write(": ping\n\n");
     }, 15_000);
     ping.unref();
+    // Rewrite the history file now and then (appends happen as trades arrive).
+    const compact = setInterval(() => this.dirty && this.save(), 10 * 60_000);
+    compact.unref();
+    // SOL/USD for market cap in dollars, from Jupiter's public price API once a minute.
+    const solPrice = async () => {
+      try {
+        const sol = "So11111111111111111111111111111111111111112";
+        const res = await fetch(`https://lite-api.jup.ag/price/v3?ids=${sol}`, { signal: AbortSignal.timeout(8000) });
+        const usd = res.ok ? ((await res.json()) as Record<string, { usdPrice?: number } | null>)[sol]?.usdPrice : undefined;
+        if (usd && usd > 0) {
+          this.solUsd = usd;
+          const msg = `data: ${JSON.stringify({ event: "solusd", usd })}\n\n`;
+          for (const c of this.clients) c.write(msg);
+        }
+      } catch {
+        /* keep the last value; the page shows SOL until one arrives */
+      }
+    };
+    void solPrice();
+    const usdTimer = setInterval(solPrice, 60_000);
+    usdTimer.unref();
   }
 
-  push(line: Record<string, unknown>) {
-    const msg = `data: ${JSON.stringify(line, (_k, v) => (typeof v === "bigint" ? v.toString() : v))}\n\n`;
-    this.history.push(msg);
-    if (this.history.length > 600) this.history.splice(0, this.history.length - 600);
+  /** The transactions held right now (for a backfill that should ignore trades arriving live meanwhile). */
+  knownSigs() {
+    return new Set(this.sigs);
+  }
+
+  /** True once this transaction's trades are held. */
+  hasSig(sig: string) {
+    return this.sigs.has(sig);
+  }
+
+  /** The oldest trade held, for resuming a backfill that stopped early. */
+  oldestSig(): string | undefined {
+    for (const e of this.trades) if (e.line.sig) return String(e.line.sig);
+    return undefined;
+  }
+
+  push(line: Line) {
+    if (line.ts == null) line = { ts: new Date().toISOString(), ...line };
+    if (line.event === "wallet") {
+      const msg = `data: ${ser(line)}\n\n`;
+      this.wallets.set(String(line.agent), msg);
+      for (const c of this.clients) c.write(msg);
+      return;
+    }
+    const e = entry(line);
+    if (e.key && this.seen.has(e.key)) return;
+    this.add(e);
+    if (isTrade(line) && this.file) {
+      try { appendFileSync(this.file, ser(line) + "\n"); } catch { /* the next compaction rewrites it */ }
+    }
+    for (const c of this.clients) c.write(e.msg);
+  }
+
+  /**
+   * Adds older trades (a chain backfill). They are marked hist so the page shows them on the
+   * chart and in the feed without touching the units' current balances. The last hour goes out
+   * to open pages as events; for anything older they get a nudge to fetch /trades again.
+   */
+  seed(lines: Line[]) {
+    const since = Date.now() - RECENT_MS;
+    const fresh: Entry[] = [];
+    for (const raw of lines) {
+      const e = entry({ ...raw, hist: true });
+      if (e.key && this.seen.has(e.key)) continue;
+      fresh.push(e);
+    }
+    if (!fresh.length) return 0;
+    fresh.sort((a, b) => a.t - b.t);
+    for (const e of fresh) this.add(e, true);
+    this.trades.sort((a, b) => a.t - b.t);
+    this.dirty = true;
+    const live = fresh.filter((e) => e.t >= since).map((e) => e.msg).join("");
+    const older = fresh.some((e) => e.t < since);
+    const msg = live + (older ? `data: ${JSON.stringify({ event: "backfill", total: this.trades.length })}\n\n` : "");
     for (const c of this.clients) c.write(msg);
+    return fresh.length;
+  }
+
+  /** Writes the history file now (after a backfill finishes). */
+  flush() {
+    if (this.dirty) this.save();
+  }
+
+  private add(e: Entry, unsorted = false) {
+    if (e.key) this.seen.add(e.key);
+    if (isTrade(e.line)) {
+      if (e.line.sig) this.sigs.add(String(e.line.sig));
+      if (unsorted || !this.trades.length || this.trades[this.trades.length - 1]!.t <= e.t) this.trades.push(e);
+      else this.trades.splice(lower(this.trades, e.t + 1), 0, e);
+      if (this.trades.length > KEEP_TRADES) for (const old of this.trades.splice(0, this.trades.length - KEEP_TRADES)) if (old.key) this.seen.delete(old.key);
+    } else {
+      this.recent.push(e);
+      const cut = Date.now() - RECENT_MS;
+      if (this.recent.length > 2000 || (this.recent[0] && this.recent[0].t < cut)) {
+        const i = this.recent.findIndex((r) => r.t >= cut);
+        for (const old of this.recent.splice(0, i < 0 ? this.recent.length : i)) if (old.key) this.seen.delete(old.key);
+      }
+    }
+  }
+
+  /** Trades and other events from `since` on, merged in time order. */
+  private replay(since: number) {
+    const a = this.trades.slice(lower(this.trades, since));
+    const b = this.recent.filter((e) => e.t >= since);
+    const out: string[] = [];
+    let i = 0, j = 0;
+    while (i < a.length || j < b.length) out.push(j >= b.length || (i < a.length && a[i]!.t <= b[j]!.t) ? a[i++]!.msg : b[j++]!.msg);
+    return out.join("");
+  }
+
+  /**
+   * Trades before `before` in a compact form for the chart:
+   * flows [t, 1 buy | 0 sell, sol, priceSol], fills [t, agent, 1 | 0, sol, priceSol].
+   */
+  private tradesJson(before: number) {
+    const now = Date.now();
+    if (this.tradesBody && this.tradesBody.n === this.trades.length && Math.abs(this.tradesBody.at - before) < 30_000 && now - this.tradesBody.at < 30_000) return this.tradesBody.body;
+    const flows: unknown[] = [], fills: unknown[] = [];
+    const r = (n: unknown, d: number) => +Number(n).toPrecision(d);
+    for (const e of this.trades) {
+      if (e.t >= before) break;
+      const l = e.line;
+      if (l.event === "flow" && (l.kind === "buy" || l.kind === "sell") && l.priceSol) flows.push([e.t, l.kind === "buy" ? 1 : 0, r(l.sol, 5), r(l.priceSol, 6)]);
+      else if (l.event === "fill" && l.priceSol) fills.push([e.t, l.agent, l.side === "buy" ? 1 : 0, r(l.sol, 5), r(l.priceSol, 6)]);
+    }
+    const body = Buffer.from(JSON.stringify({ before, flows, fills }));
+    this.tradesBody = { n: this.trades.length, at: before, body };
+    return body;
+  }
+
+  private load() {
+    if (!this.file || !existsSync(this.file)) return;
+    try {
+      for (const row of readFileSync(this.file, "utf8").split("\n")) {
+        if (!row) continue;
+        let line: Line;
+        try { line = JSON.parse(row) as Line; } catch { continue; }
+        if (!isTrade(line)) continue;
+        // Balances come from a fresh wallet read on this start, so earlier fills are history only.
+        const e = entry({ ...line, hist: true });
+        if (e.key && this.seen.has(e.key)) continue;
+        this.add(e, true);
+      }
+      this.trades.sort((a, b) => a.t - b.t);
+      console.log(`  Dashboard: ${this.trades.length} trades loaded from ${this.file}`);
+    } catch (e) {
+      console.warn(`  Dashboard: could not read ${this.file}: ${(e as Error).message}`);
+    }
+  }
+
+  private save() {
+    if (!this.file) return;
+    try {
+      const tmp = this.file + ".tmp";
+      writeFileSync(tmp, this.trades.map((e) => ser(e.line) + "\n").join(""));
+      renameSync(tmp, this.file);
+      this.dirty = false;
+    } catch (e) {
+      console.warn(`  Dashboard: could not write ${this.file}: ${(e as Error).message}`);
+    }
   }
 
   close() {
+    this.save();
     for (const c of this.clients) c.end();
     this.server.close();
   }
@@ -64,9 +267,10 @@ const PAGE = /* html */ `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Helioswarm Live</title>
 <meta name="description" content="Helioswarm agents trading on Solana, live: every unit's wallet, position and trade as it happens.">
+<meta name="theme-color" content="#000000">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000000'/%3E%3Cellipse cx='16' cy='16' rx='13' ry='6' transform='rotate(-20 16 16)' fill='none' stroke='%23EEF0F2' stroke-width='1.5'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23FF8A3D'/%3E%3Crect x='25' y='9' width='4' height='4' fill='%23BFE9EC'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -74,95 +278,121 @@ const PAGE = /* html */ `<!doctype html>
 <style>
 :root {
   color-scheme: dark;
-  --bg: #000000; --surface: #181818; --surface-2: #1F1F1F; --fg: #EEF0F2; --muted: #9B9B9B; --dim: #5B5F66; --line: #2A2C30;
-  --sun: #FF8A3D; --ice: #BFE9EC; --grid: rgba(255,255,255,0.05); --g: 96px; --pad: 16px; --top: 96px;
+  --bg: #000000; --fg: #EEF0F2; --muted: #9B9B9B; --dim: #5B5F66; --line: #2A2C30; --line-soft: rgba(42,44,48,0.6);
+  --sun: #FF8A3D; --sun-core: #FFFFFF; --ice: #BFE9EC; 
+  --g: 96px; --padl: 16px; --padr: 16px; --top: 96px;
   --sans: "Geist", "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
 }
-@media (min-width: 768px) { :root { --pad: 32px; } }
 *, *::before, *::after { box-sizing: border-box; }
 body { margin: 0; color: var(--fg); background: var(--bg); font-family: var(--sans); font-size: 16px; line-height: 24px; -webkit-font-smoothing: antialiased; overflow-x: hidden; position: relative; isolation: isolate; min-height: 100vh; }
-body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
-  background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
-  background-size: var(--g) var(--g); background-position: var(--pad) var(--top); }
+h1, h2, p, dl, dd { margin: 0; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--ice); outline-offset: 3px; }
+::selection { background: var(--sun); color: var(--bg); }
 .grain { position: fixed; inset: 0; z-index: 40; pointer-events: none; opacity: 0.12;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
-a { color: inherit; }
-::selection { background: var(--sun); color: var(--bg); }
-.mono, .label, .num { font-family: var(--mono); }
-.label { font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.wrap { position: relative; z-index: 2; padding-left: max(var(--padl), env(safe-area-inset-left, 0px)); padding-right: max(var(--padr), env(safe-area-inset-right, 0px)); }
+.label { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .label b { font-weight: 500; color: var(--fg); }
-.sun { color: var(--sun); } .ice { color: var(--ice); } .dim { color: var(--dim); } .muted { color: var(--muted); }
-.wrap { padding-left: var(--pad); padding-right: var(--pad); }
+.sun { color: var(--sun); } .ice { color: var(--ice); } .dim { color: var(--dim); }
 
-/* nav */
-.nav { height: var(--top); display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+/* nav: bare, brand left, status right */
+.nav { position: absolute; z-index: 50; left: 0; right: 0; top: 0; height: var(--top); display: flex; justify-content: space-between; align-items: center; gap: 16px;
+  padding-left: max(var(--padl), env(safe-area-inset-left, 0px)); padding-right: max(var(--padr), env(safe-area-inset-right, 0px)); }
 .brand { display: flex; align-items: center; gap: 8px; text-decoration: none; font-family: var(--mono); font-weight: 500; font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; }
-.btn { display: inline-flex; align-items: center; font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
-  padding: 8px 12px; border: 1px solid var(--line); background: rgba(0,0,0,0.6); color: var(--fg); text-decoration: none; cursor: pointer; transition: border-color 700ms var(--ease), background-color 700ms var(--ease), color 700ms var(--ease); }
-.btn::before { content: "[ "; white-space: pre; } .btn::after { content: " ]"; white-space: pre; }
-.btn:hover { border-color: var(--fg); }
-.btn.solid { background: var(--fg); color: var(--bg); border-color: var(--fg); }
-.btn.solid:hover { background: var(--sun); border-color: var(--sun); }
+.brand svg { display: block; }
 .status { display: inline-flex; align-items: center; gap: 8px; }
 .blip { width: 8px; height: 8px; background: var(--dim); }
 .on .blip { background: var(--sun); animation: blink 1.2s steps(2, start) infinite; }
 @keyframes blink { to { visibility: hidden; } }
+.btn { display: inline-flex; align-items: center; font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 8px 12px; border: 1px solid var(--line); background: rgba(0,0,0,0.6); color: var(--fg); text-decoration: none; cursor: pointer;
+  transition: border-color 700ms var(--ease), background-color 700ms var(--ease), color 700ms var(--ease); }
+.btn::before { content: "[ "; white-space: pre; } .btn::after { content: " ]"; white-space: pre; }
+.btn:hover { border-color: var(--fg); }
+.btn.solid { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.btn.solid:hover { background: var(--sun); border-color: var(--sun); }
 
-/* hero strip */
-.hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px 32px; padding-bottom: 40px; border-bottom: 1px solid var(--line); }
-.meta { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 20px; letter-spacing: 0.04em; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+/* console: the 30 second chart fills it, readouts sit in the corners */
+.console { position: relative; z-index: 2; overflow: hidden; border-bottom: 1px solid var(--line); min-height: 640px; display: flex; }
+.overlay { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto 1fr auto; gap: 24px;
+  padding: var(--top) max(var(--padr), env(safe-area-inset-right, 0px)) 40px max(var(--padl), env(safe-area-inset-left, 0px)); pointer-events: none; }
+.meta { align-self: start; margin: 0; padding-top: 8px; font-family: var(--mono); font-size: 12px; line-height: 20px; letter-spacing: 0.04em; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .meta b { font-weight: 400; color: var(--fg); }
-.clock { text-align: right; font-family: var(--mono); font-size: 12px; line-height: 20px; letter-spacing: 0.04em; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+.meta .alert { color: var(--sun); }
+.clock { padding-top: 8px; text-align: right; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; font-family: var(--mono); font-size: 12px; line-height: 20px; letter-spacing: 0.04em; }
 .clock strong { font-weight: 400; color: var(--fg); font-variant-numeric: tabular-nums; }
-h1 { grid-column: 1 / -1; margin: 24px 0 0; font-size: 30px; line-height: 36px; letter-spacing: -0.01em; font-weight: 500; text-transform: uppercase; }
-h1 span { display: block; color: var(--muted); }
-@media (min-width: 768px) { h1 { font-size: 36px; line-height: 40px; } }
-@media (min-width: 1024px) { h1 { font-size: 48px; line-height: 1; } }
+.legend { display: none; color: var(--muted); white-space: pre; }
+@media (min-width: 768px) { .legend { display: block; } }
 
-/* stats */
-.stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
-@media (min-width: 900px) { .stats { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
-.stat { padding: 20px 0 20px; border-right: 1px solid var(--line); padding-left: 16px; }
-.stat:first-child { padding-left: 0; }
-.stat:last-child { border-right: 0; }
-.stat .v { font-family: var(--mono); font-size: 24px; line-height: 32px; margin-top: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-@media (max-width: 899px) { .stat:nth-child(2n) { border-right: 0; } .stat:nth-child(2n+1) { padding-left: 0; } .stat { border-bottom: 1px solid var(--line); } }
+/* readouts: one row on the grid, no boxes */
+.readouts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+.ro { padding: 20px 0 24px; min-width: 0; }
+.ro .v { font-family: var(--mono); font-size: 24px; line-height: 32px; margin-top: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 899px) { .ro:nth-child(n+3) { border-top: 1px solid var(--line-soft); } }
+@media (min-width: 900px) { .readouts { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 
-/* layout */
-.grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
-@media (min-width: 1100px) { .grid { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); } .grid > .col:first-child { border-right: 1px solid var(--line); padding-right: 32px; } .grid > .col:last-child { padding-left: 32px; } }
+/* main grid */
+.panes { display: grid; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 1100px) { .panes { grid-template-columns: minmax(0, 1fr) var(--side, 400px); } .panes > .pane:first-child { border-right: 1px solid var(--line); padding-right: 32px; } .panes > .pane:last-child { padding-left: 32px; } }
 .block { padding: 32px 0; border-bottom: 1px solid var(--line); }
-.block-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
-#chart { width: 100%; height: 240px; display: block; }
+.block:last-child { border-bottom: 0; }
+.head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; min-height: 34px; }
+#hero { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.mapbox { position: relative; height: 360px; overflow: hidden; }
+#swarm { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+@media (max-width: 759px) { .mapbox { height: 300px; } }
+.clock .btn { pointer-events: auto; margin-top: 8px; }
+.pair { white-space: nowrap; }
+.rng { display: inline-flex; gap: 4px; pointer-events: auto; }
+.rng button { font: inherit; letter-spacing: 0.08em; color: var(--dim); background: rgba(0,0,0,0.6); border: 1px solid transparent; padding: 2px 6px; cursor: pointer; transition: color 700ms var(--ease), border-color 700ms var(--ease); }
+.rng button:hover { color: var(--fg); }
+.rng button.on { color: var(--sun); border-color: var(--sun); }
+.zoom { margin-top: 2px; }
+@media (max-width: 767px) { .rng { position: absolute; left: max(var(--padl), env(safe-area-inset-left, 0px)); top: 212px; margin-left: -6px; } .rng.zoom { top: 244px; margin-top: 0; } }
+@media (max-width: 767px) { .clock .pair, .clock .btn { display: none; } }
 
-/* units */
-.units { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 16px; }
-.unit { border: 1px solid var(--line); background: rgba(0,0,0,0.86); padding: 12px; display: flex; flex-direction: column; gap: 8px; transition: border-color 700ms var(--ease); }
-.unit.buy { border-color: var(--ice); } .unit.sell { border-color: var(--sun); }
-.unit-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-.unit-title { font-family: var(--mono); font-size: 14px; line-height: 20px; text-transform: uppercase; letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.traits { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; }
-.traits dt, .traits dd { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; }
-.traits dt { color: var(--muted); }
-.traits dd { color: var(--fg); text-align: right; font-variant-numeric: tabular-nums; }
-.wallet { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.04em; color: var(--ice); text-decoration: none; }
+/* units: a table on wide screens, stacked rows on narrow ones */
+.units { display: flex; flex-direction: column; }
+.urow { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.8fr) minmax(0, 0.9fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 1fr) 112px; gap: 16px; align-items: center;
+  padding: 12px 0; border-bottom: 1px solid var(--line-soft); font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.04em; position: relative; transition: background-color 1.2s var(--ease); }
+.urow.thead { color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; padding-top: 0; border-bottom-color: var(--line); }
+.urow .r { text-align: right; font-variant-numeric: tabular-nums; }
+.urow .id { color: var(--fg); text-transform: uppercase; letter-spacing: 0.06em; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.urow .id span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.urow .cls { color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.urow .last { grid-column: 1 / -1; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -4px; }
+.urow .last::before { content: "> "; color: var(--sun); }
+.sq { width: 8px; height: 8px; flex: none; border: 1px solid var(--fg); }
+.urow.buy { background: rgba(191,233,236,0.06); } .urow.buy .sq { background: var(--ice); border-color: var(--ice); }
+.urow.sell { background: rgba(255,138,61,0.07); } .urow.sell .sq { background: var(--sun); border-color: var(--sun); }
+.urow.hl { background: rgba(255,255,255,0.04); }
+.wallet { color: var(--ice); text-decoration: none; }
 .wallet:hover { text-decoration: underline; }
-.last { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.04em; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-top: 1px solid var(--line); padding-top: 8px; }
-.last::before { content: "> "; color: var(--sun); }
 .bar { display: grid; grid-template-columns: repeat(16, 1fr); gap: 2px; }
 .bar i { height: 8px; background: var(--line); }
 .bar i.on { background: var(--fg); } .bar.hot i.on { background: var(--sun); }
+@media (max-width: 759px) {
+  .urow.thead { display: none; }
+  .urow { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; }
+  .urow .cls, .urow .wcell { color: var(--dim); }
+  .urow .exp { grid-column: 1 / -1; }
+  .urow > * { text-align: left; }
+  .urow > :nth-child(even) { text-align: right; }
+  .urow > .last { text-align: left; }
+  .head .sub { display: none; }
+}
 
 /* feed */
 .tabs { display: flex; gap: 8px; flex-wrap: wrap; }
 .tabs .btn { padding: 4px 8px; }
 .tabs .btn.on { border-color: var(--sun); color: var(--sun); }
-.feed { max-height: 760px; overflow-y: auto; }
-.ev { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid rgba(42,44,48,0.6); font-family: var(--mono); font-size: 12px; line-height: 18px; letter-spacing: 0.02em; animation: in 1.2s var(--ease); }
+.feed { max-height: 820px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.ev { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); font-family: var(--mono); font-size: 12px; line-height: 18px; letter-spacing: 0.02em; animation: in 1.2s var(--ease); }
 @keyframes in { from { background: rgba(255,138,61,0.10); } to { background: transparent; } }
-.ev .t { color: var(--dim); }
+.ev .t { color: var(--dim); font-variant-numeric: tabular-nums; }
 .ev.market { color: var(--muted); }
 .ev a { color: var(--ice); text-decoration: none; }
 .ev a:hover { text-decoration: underline; }
@@ -173,66 +403,96 @@ h1 span { display: block; color: var(--muted); }
 .early { color: var(--sun); }
 .sig { display: inline-block; padding: 0 6px; border: 1px solid var(--sun); color: var(--sun); text-transform: uppercase; letter-spacing: 0.08em; margin-right: 8px; }
 .sig.low { border-color: var(--ice); color: var(--ice); }
-.empty { padding: 32px 0; color: var(--dim); font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
-footer { padding: 32px 0 48px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.empty { padding: 24px 0; color: var(--dim); font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.empty::before { content: "> "; color: var(--sun); }
+
+/* card that follows a unit on the map */
+.callout { position: absolute; left: 0; top: 0; width: 232px; z-index: 3; pointer-events: none; border: 1px solid var(--muted); background: rgba(0,0,0,0.86); padding: 12px;
+  display: flex; flex-direction: column; gap: 8px; opacity: 0; transition: opacity 300ms var(--ease), border-color 700ms var(--ease); }
+.callout.on { opacity: 1; }
+.callout.alert { border-color: var(--sun); } .callout.ok { border-color: var(--ice); }
+.callout-head { display: flex; justify-content: space-between; gap: 8px; }
+.callout-title { font-family: var(--mono); font-size: 14px; line-height: 20px; text-transform: uppercase; letter-spacing: 0.04em; }
+.callout dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+.callout dt, .callout dd { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.08em; text-transform: uppercase; }
+.callout dt { color: var(--muted); } .callout dd { text-align: right; font-variant-numeric: tabular-nums; }
+
+footer { position: relative; z-index: 2; border-top: 1px solid var(--line); }
+.foot { padding-top: 32px; padding-bottom: 48px; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.foot nav { display: flex; gap: 12px; }
+@media (prefers-reduced-motion: reduce) { .ev, .on .blip { animation: none; } }
 </style>
 </head>
 <body>
 <div class="grain" aria-hidden="true"></div>
-<div class="wrap">
-  <nav class="nav">
-    <a class="brand" href="https://helioswarm.xyz/">
-      <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="16" rx="13" ry="6" transform="rotate(-20 16 16)" fill="none" stroke="#EEF0F2" stroke-width="1.5"/><circle cx="16" cy="16" r="4" fill="#FF8A3D"/><rect x="25" y="9" width="4" height="4" fill="#BFE9EC"/></svg>
-      Helioswarm <span class="dim">/ live</span>
-    </a>
-    <span class="label status" id="conn"><span class="blip"></span><span id="connTxt">connecting</span></span>
-  </nav>
+<header class="nav">
+  <a class="brand" href="https://helioswarm.xyz/" aria-label="Helioswarm home">
+    <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="16" rx="14" ry="6" transform="rotate(-20 16 16)" fill="none" stroke="#EEF0F2" stroke-width="1.5"/><circle cx="16" cy="16" r="4" fill="#FF8A3D"/><rect x="26" y="8" width="4" height="4" fill="#BFE9EC"/></svg>
+    Helioswarm <span class="dim">/ Live</span>
+  </a>
+  <span class="label status" id="conn"><span class="blip"></span><span id="connTxt">connecting</span></span>
+</header>
 
-  <header class="hero">
-<pre class="meta" id="meta">SWARM ....... <b>HELIOS-01</b>
+<main>
+<section class="console" id="console">
+  <canvas id="hero" role="img" aria-label="Price over the last 30 seconds, with every unit trade marked on the line."></canvas>
+  <div class="overlay">
+<pre class="meta">SWARM ....... <b>HELIOS-01</b>
 UNITS ....... <b id="mUnits">-</b>
 TARGET ...... <b id="mTarget">-</b>
-MODE ........ <b id="mMode">-</b></pre>
+MODE ........ <b id="mMode">-</b>
+STATUS ...... <b id="mStatus">NOMINAL</b></pre>
     <div class="clock">
       <strong id="clock">T+0000</strong>
-      <span class="label"><span class="dim">[ ] HOLD</span>&nbsp;&nbsp;<span class="ice">[+] BUY</span>&nbsp;&nbsp;<span class="sun">[-] SELL</span></span>
+      <span class="legend" aria-hidden="true">[ ] HOLD   <span class="ice">[+] BUY</span>   <span class="sun">[-] SELL</span></span>
+      <span class="label pair"><b id="sym">-</b> MCAP &nbsp;<span id="chg"></span> <span class="dim">:: <span id="rngLbl">30S</span></span></span>
+      <span class="rng" role="group" aria-label="Chart range"><button type="button" data-r="30S">30S</button><button type="button" data-r="5M">5M</button><button type="button" data-r="1H">1H</button><button type="button" data-r="24H">24H</button><button type="button" data-r="ALL">ALL</button></span>
+      <span class="rng zoom" role="group" aria-label="Chart zoom"><button type="button" id="zOut" aria-label="Zoom out">&minus;</button><button type="button" id="zIn" aria-label="Zoom in">+</button><button type="button" id="zReset">RESET</button><button type="button" id="goLive" class="on" hidden>LIVE &rsaquo;</button></span>
+      <a class="btn" id="mintLink" target="_blank" rel="noopener">Token</a>
     </div>
-    <h1>Many minds.<span>Trading live.</span></h1>
-  </header>
+  </div>
+</section>
 
-  <section class="stats">
-    <div class="stat"><div class="label">Swarm P&amp;L</div><div class="v" id="sPnl">-</div></div>
-    <div class="stat"><div class="label">Unit trades</div><div class="v" id="sTrades">0</div></div>
-    <div class="stat"><div class="label">Market +/- (5m)</div><div class="v" id="sMkt">0 / 0</div></div>
-    <div class="stat"><div class="label">Seen pre-exec</div><div class="v" id="sEarly">-</div></div>
-    <div class="stat"><div class="label">Price (SOL)</div><div class="v" id="price">-</div></div>
+<div class="wrap">
+  <section class="readouts" aria-label="Swarm readouts">
+    <div class="ro"><div class="label">Swarm P&amp;L</div><div class="v" id="sPnl">-</div></div>
+    <div class="ro"><div class="label">Unit trades</div><div class="v" id="sTrades">00</div></div>
+    <div class="ro"><div class="label">Volume 5m <span class="dim">SOL</span></div><div class="v" id="sVol">0</div></div>
+    <div class="ro"><div class="label">Seen pre-exec</div><div class="v" id="sEarly">-</div></div>
+    <div class="ro"><div class="label">Market cap</div><div class="v" id="mcap">-</div></div>
   </section>
 
-  <div class="grid">
-    <div class="col">
+  <div class="panes">
+    <div class="pane">
       <section class="block">
-        <div class="block-head"><span class="label"><b id="sym">-</b> / SOL &nbsp;<span id="chg"></span></span><a class="btn" id="mintLink" target="_blank" rel="noopener">Token</a></div>
-        <canvas id="chart"></canvas>
+        <div class="head"><span class="label">Swarm map</span><span class="label dim sub">Own mind :: own wallet :: one board</span></div>
+        <div class="mapbox" id="mapbox">
+          <canvas id="swarm" role="img" aria-label="The swarm's units as squares orbiting a dithered sun. A unit lights up when it trades."></canvas>
+          <div class="callout" id="callout" aria-hidden="true"></div>
+        </div>
       </section>
       <section class="block">
-        <div class="block-head"><span class="label">Units <b id="agentCount"></b></span><span class="label dim">Own mind · own wallet · one board</span></div>
+        <div class="head"><span class="label">Units <b id="agentCount"></b></span></div>
         <div class="units" id="agents"></div>
       </section>
     </div>
-    <div class="col">
+    <div class="pane">
       <section class="block">
-        <div class="block-head"><span class="label">Feed</span>
+        <div class="head"><span class="label">Feed</span>
           <span class="tabs"><button class="btn on" data-f="all">All</button><button class="btn" data-f="swarm">Units</button><button class="btn" data-f="early">Pre-exec</button></span></div>
-        <div class="feed" id="feed"><div class="empty">Waiting for activity…</div></div>
+        <div class="feed" id="feed"><div class="empty">Awaiting activity</div></div>
       </section>
     </div>
   </div>
-
-  <footer>
-    <span class="label">Every unit trades from its own public wallet. Links open on Solscan.</span>
-    <span style="display:flex; gap:12px"><a class="btn" href="https://helioswarm.xyz/">Home</a><a class="btn solid" href="https://github.com/helioswarmai/helioswarm" target="_blank" rel="noopener">GitHub</a></span>
-  </footer>
 </div>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <p class="label"><span class="sun">///</span> Every unit trades from its own public wallet</p>
+    <nav aria-label="Footer"><a class="btn" href="https://helioswarm.xyz/">Home</a><a class="btn solid" href="https://github.com/helioswarmai/helioswarm" target="_blank" rel="noopener">GitHub</a></nav>
+  </div>
+</footer>
 <script>
 const $ = (id) => document.getElementById(id);
 const short = (a) => a && a.length > 12 ? a.slice(0, 4) + "…" + a.slice(-4) : (a || "?");
@@ -241,92 +501,513 @@ const big = (n) => { const a = Math.abs(n); return a >= 1e9 ? (n/1e9).toFixed(2)
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const time = (ts) => { const d = ts ? new Date(ts) : new Date(); return isNaN(d) ? "" : d.toLocaleTimeString([], { hour12: false }); };
 const SIG = { whale_sell: "Whale sell", holder_moved: "Holder moved", sell_pressure: "Sell pressure", buy_pressure: "Buy pressure", pending_sell: "Big sell incoming", pending_move: "Holder about to move", pending_activity: "Holder active", note: "Note" };
+// Preset traits (src/types.ts) set each class's orbit speed and direction on the map.
+const PRESETS = { degen: { risk: 235, patience: 40, contrarian: 70 }, showman: { risk: 140, patience: 110, contrarian: 80 }, holder: { risk: 70, patience: 230, contrarian: 110 },
+  contrarian: { risk: 150, patience: 160, contrarian: 235 }, momentum: { risk: 170, patience: 90, contrarian: 30 }, sniper: { risk: 190, patience: 25, contrarian: 90 } };
+const RING_ORDER = ["degen", "showman", "holder", "contrarian", "momentum", "sniper"];
 
 let info = null, filter = "all";
 const agents = new Map();
-const prices = [], marks = [], mkt = [], early = [];
-let agentTrades = 0, lastPrice = 0, firstPrice = 0;
+const prices = [], marks = [], ticks = [], mkt = [], early = [];
+let agentTrades = 0, lastPrice = 0, syncing = true;
+// Events carry their own time, so history replayed on connect lands where it happened.
+const tOf = (l) => Date.parse(l.ts) || Date.now();
+// First index whose time is at or after t (arrays are kept in time order).
+function lb(arr, t) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].t < t) lo = m + 1; else hi = m; } return lo; }
+function ins(arr, item) { let i = arr.length; while (i > 0 && arr[i - 1].t > item.t) i--; arr.splice(i, 0, item); }
+function addPrice(t, p) { ins(prices, { t, p }); lastPrice = prices[prices.length - 1].p; }
+// Some routed swaps (multi-hop, dust legs) read as absurd prices. A trade only moves the chart
+// when its price is within 2.5x of the median of recent accepted trades; a run of rejects that
+// agree with each other is taken as a real move and becomes the new reference.
+function makeGate() {
+  let win = [], rej = [];
+  const med = (a) => [...a].sort((x, y) => x - y)[a.length >> 1];
+  return (p, sol) => {
+    if (!(p > 0) || !(sol >= 0.002)) return false;
+    if (win.length >= 5) {
+      const m = med(win);
+      if (p > m * 2.5 || p < m / 2.5) {
+        rej.push(p); if (rej.length > 8) rej.shift();
+        const r = med(rej);
+        if (rej.length < 8 || rej.some((x) => x > r * 1.5 || x < r / 1.5)) return false;
+        win = rej.slice(); rej = []; return true;
+      }
+    }
+    rej = []; win.push(p); if (win.length > 15) win.shift(); return true;
+  };
+}
+let gate = makeGate();
+let pointer = null, hoverId = null, pulses = [], status = null, cardKey = "";
 const t0 = Date.now();
+let solUsd = null;
+// Market cap: price in SOL x supply (pump.fun tokens mint 1B), in USD once the server sends SOL/USD.
+const supplyOf = () => Number(info?.tokens?.[0]?.supply) || 1e9;
+const mcapOf = (p) => p * supplyOf() * (solUsd || 1);
+const money = (v) => { const a = Math.abs(v), s = a >= 1e9 ? (v / 1e9).toFixed(2) + "B" : a >= 1e6 ? (v / 1e6).toFixed(2) + "M" : a >= 1e3 ? (v / 1e3).toFixed(1) + "K" : v.toFixed(solUsd ? 0 : 2); return solUsd ? "$" + s : s + " SOL"; };
 const sym = (m) => (info?.tokens.find((t) => t.mint === m)?.symbol) || short(m);
 
 function bar(frac, hot) {
   const n = Math.max(0, Math.min(16, Math.round(frac * 16)));
   return '<div class="bar' + (hot ? " hot" : "") + '">' + Array.from({ length: 16 }, (_, i) => '<i class="' + (i < n ? "on" : "") + '"></i>').join("") + "</div>";
 }
+function equityOf(a) { const posVal = a.tokens * lastPrice; const equity = a.cash + posVal; const pnl = equity - a.start; return { posVal, equity, pnl, pct: a.start > 0 ? (pnl / a.start) * 100 : 0 }; }
+function signed(n, d) { return (n >= 0 ? "+" : "") + fmt(n, d); }
 
 function renderAgents() {
   const el = $("agents");
-  el.innerHTML = "";
+  let html = '<div class="urow thead"><span>Unit</span><span>Class</span><span>Wallet</span><span class="r">SOL</span><span class="r">Holding</span><span class="r">P&amp;L</span><span>Exposure</span></div>';
   let total = 0, start = 0;
   for (const a of agents.values()) {
-    const posVal = a.tokens * lastPrice;
-    const equity = a.cash + posVal;
-    const pnl = equity - a.start;
-    const pct = a.start > 0 ? (pnl / a.start) * 100 : 0;
-    total += equity; start += a.start;
-    const d = document.createElement("article");
-    d.className = "unit" + (a.flash ? " " + a.flash : "");
-    d.innerHTML =
-      '<div class="unit-head"><span class="unit-title">' + esc(a.id) + '</span><span class="label">' + esc(a.preset) + "</span></div>" +
-      (a.wallet ? '<a class="wallet" href="https://solscan.io/account/' + a.wallet + '" target="_blank" rel="noopener">' + short(a.wallet) + " ↗</a>" : '<span class="wallet dim">paper</span>') +
-      '<dl class="traits"><dt>SOL</dt><dd>' + fmt(a.cash) + "</dd><dt>Holding</dt><dd>" + (a.tokens > 0 ? big(a.tokens) : "—") + "</dd><dt>P&amp;L</dt><dd class='" + (pnl >= 0 ? "ice" : "sun") + "'>" + (pnl >= 0 ? "+" : "") + fmt(pnl) + " · " + pct.toFixed(1) + "%</dd></dl>" +
-      bar(equity > 0 ? posVal / equity : 0, a.flash === "sell") +
-      '<div class="last">' + (a.last ? esc(a.last) : "watching") + "</div>";
-    el.appendChild(d);
+    const e = equityOf(a);
+    total += e.equity; start += a.start;
+    html += '<article class="urow' + (a.flash ? " " + a.flash : "") + (hoverId === a.id ? " hl" : "") + '" data-id="' + esc(a.id) + '">' +
+      '<span class="id"><i class="sq"></i><span>' + esc(a.id) + "</span></span>" +
+      '<span class="cls">' + esc(a.preset) + "</span>" +
+      '<span class="wcell">' + (a.wallet ? '<a class="wallet" href="https://solscan.io/account/' + a.wallet + '" target="_blank" rel="noopener">' + short(a.wallet) + " ↗</a>" : '<span class="dim">paper</span>') + "</span>" +
+      '<span class="r">' + fmt(a.cash) + "</span>" +
+      '<span class="r">' + (a.tokens > 0 ? big(a.tokens) : '<span class="dim">—</span>') + "</span>" +
+      '<span class="r ' + (e.pnl >= 0 ? "ice" : "sun") + '">' + signed(e.pnl) + ' <span class="dim">' + e.pct.toFixed(1) + "%</span></span>" +
+      '<span class="exp">' + bar(e.equity > 0 ? e.posVal / e.equity : 0, a.flash === "sell") + "</span>" +
+      '<span class="last">' + (a.last ? esc(a.last) : "watching") + "</span></article>";
   }
+  el.innerHTML = html;
   $("agentCount").textContent = agents.size ? String(agents.size).padStart(2, "0") : "";
   const p = total - start;
-  $("sPnl").innerHTML = start ? '<span class="' + (p >= 0 ? "ice" : "sun") + '">' + (p >= 0 ? "+" : "") + fmt(p) + "</span>" : "—";
-}
-
-function drawChart() {
-  const c = $("chart"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
-  c.width = w * dpr; c.height = h * dpr;
-  const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
-  g.strokeStyle = "rgba(255,255,255,0.05)"; g.lineWidth = 1;
-  for (let y = 0.5; y < h; y += 48) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
-  const now = Date.now(), from = now - 10 * 60_000;
-  const pts = prices.filter((p) => p.t >= from);
-  if (pts.length < 2) { g.fillStyle = "#5B5F66"; g.font = "12px 'Geist Mono', monospace"; g.fillText("WAITING FOR TRADES…", 0, h / 2); return; }
-  let lo = Math.min(...pts.map((p) => p.p)), hi = Math.max(...pts.map((p) => p.p));
-  if (hi === lo) { hi *= 1.01; lo *= 0.99; }
-  const x = (t) => ((t - from) / (now - from)) * (w - 8) + 4;
-  const y = (p) => 12 + (1 - (p - lo) / (hi - lo)) * (h - 24);
-  g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(x(p.t), y(p.p)) : g.moveTo(x(p.t), y(p.p)));
-  g.strokeStyle = "#EEF0F2"; g.lineWidth = 1.5; g.stroke();
-  for (const m of marks.filter((m) => m.t >= from)) {
-    const s = 7; g.fillStyle = m.side === "buy" ? "#BFE9EC" : "#FF8A3D"; g.fillRect(x(m.t) - s / 2, y(m.p) - s / 2, s, s);
-  }
-  const last = pts[pts.length - 1];
-  g.fillStyle = "#FF8A3D"; g.fillRect(x(last.t) - 3, y(last.p) - 3, 6, 6);
+  $("sPnl").innerHTML = start ? '<span class="' + (p >= 0 ? "ice" : "sun") + '">' + signed(p) + "</span>" : "—";
 }
 
 function add(cls, html, ts, kind) {
   const feed = $("feed");
   if (feed.firstElementChild?.classList.contains("empty")) feed.innerHTML = "";
   const d = document.createElement("div");
+  const t = Date.parse(ts) || Date.now();
   d.className = "ev " + cls;
   d.dataset.kind = kind;
+  d.dataset.t = String(t);
   d.innerHTML = '<span class="t">' + time(ts) + "</span><span>" + html + "</span>";
   if (filter !== "all" && kind !== filter) d.style.display = "none";
-  feed.prepend(d);
+  let at = feed.firstElementChild;
+  while (at && Number(at.dataset.t) > t) at = at.nextElementSibling;
+  feed.insertBefore(d, at);
   while (feed.children.length > 400) feed.lastChild.remove();
 }
 
 function stats() {
   const cut = Date.now() - 5 * 60_000;
   while (mkt.length && mkt[0].t < cut) mkt.shift();
-  $("sMkt").innerHTML = '<span class="ice">' + mkt.filter((m) => m.s === "buy").length + '</span> / <span class="sun">' + mkt.filter((m) => m.s === "sell").length + "</span>";
+  let vb = 0, vs = 0; for (const m of mkt) { if (m.s === "buy") vb += m.sol; else vs += m.sol; }
+  $("sVol").innerHTML = '<span class="ice">' + vb.toFixed(1) + '</span> <span class="dim">/</span> <span class="sun">' + vs.toFixed(1) + "</span>";
   const e = early.slice(-200).sort((a, b) => a - b);
-  $("sEarly").textContent = e.length ? e[Math.floor(e.length / 2)] + "ms" : "—";
+  $("sEarly").innerHTML = e.length ? e[Math.floor(e.length / 2)] + '<span class="dim">ms</span>' : "—";
   $("sTrades").textContent = String(agentTrades).padStart(2, "0");
   if (lastPrice) {
-    $("price").textContent = lastPrice.toPrecision(4);
-    if (firstPrice) { const c = (lastPrice / firstPrice - 1) * 100; $("chg").innerHTML = '<span class="' + (c >= 0 ? "ice" : "sun") + '">' + (c >= 0 ? "+" : "") + c.toFixed(2) + "%</span>"; }
+    $("mcap").textContent = money(mcapOf(lastPrice));
+    const i = lb(prices, Date.now() - SPAN), ref = prices[Math.max(0, i - 1)]?.p || 0;
+    if (ref) { const c = (lastPrice / ref - 1) * 100; $("chg").innerHTML = '<span class="' + (c >= 0 ? "ice" : "sun") + '">' + (c >= 0 ? "+" : "") + c.toFixed(2) + "%</span>"; }
   }
   const s = Math.floor((Date.now() - t0) / 1000);
   $("clock").textContent = "T+" + String(Math.floor(s / 60)).padStart(4, "0");
 }
+
+// ---------- shared drawing ----------
+const consoleEl = $("console"), mapEl = $("mapbox"), root = document.documentElement;
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const C = { fg: "#EEF0F2", muted: "#9B9B9B", dim: "#5B5F66", sun: "#FF8A3D", core: "#FFFFFF", ice: "#BFE9EC", bg: "#000000" };
+const MONO = "'Geist Mono', ui-monospace, monospace";
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const bayer = (gx, gy) => (BAYER[(gx & 3) + ((gy & 3) << 2)] + 0.5) / 16;
+let dpr = 1, G = 96, padL = 16, padR = 16, rows = 5, lastW = 0, mapT = 0;
+let seed = 11;
+const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+const stars = Array.from({ length: 200 }, () => [rnd(), rnd(), rnd()]);
+function crosses(g, w, h, ox, oy) {
+  g.lineWidth = 1; g.strokeStyle = C.muted; g.globalAlpha = 0.4; g.beginPath();
+  for (let x = ox; x <= w; x += G) for (let y = oy; y <= h; y += G) { g.moveTo(x - 3, y + 0.5); g.lineTo(x + 4, y + 0.5); g.moveTo(x + 0.5, y - 3); g.lineTo(x + 0.5, y + 4); }
+  g.stroke();
+}
+function starfield(g, w, h) { for (const s of stars) { g.globalAlpha = 0.2 + 0.5 * s[2]; const b = s[2] > 0.85 ? 2 : 1; g.fillStyle = C.muted; g.fillRect(Math.round(s[0] * w), Math.round(s[1] * h), b, b); } g.globalAlpha = 1; }
+function brackets(g, x, y, q, col) {
+  const bx = Math.round(x) + 0.5, by = Math.round(y) + 0.5, c4 = 4;
+  g.strokeStyle = col; g.beginPath();
+  [[-1, -1], [1, -1], [1, 1], [-1, 1]].forEach((m) => { g.moveTo(bx + m[0] * q, by + m[1] * (q - c4)); g.lineTo(bx + m[0] * q, by + m[1] * q); g.lineTo(bx + m[0] * (q - c4), by + m[1] * q); });
+  g.stroke();
+}
+// a small dithered sun: the live price head on the chart, the board on the map
+function ditherSun(g, x0, y0, R, ext, cell, coreOnly, t) {
+  const n = Math.ceil(ext / cell);
+  for (let gy = -n; gy <= n; gy++) for (let gx = -n; gx <= n; gx++) {
+    const x = gx * cell, y = gy * cell, d = Math.sqrt(x * x + y * y);
+    if (d > ext) continue;
+    if (d < R) { if (coreOnly) { g.fillStyle = C.core; g.fillRect(x0 + x, y0 + y, cell, cell); } continue; }
+    if (coreOnly) continue;
+    let v = 1 - (d - R) / (ext - R);
+    v = v * v * (0.82 + 0.18 * Math.sin(t * 0.9 - d * 0.06));
+    if (v > bayer(gx, gy)) { g.fillStyle = C.sun; g.fillRect(x0 + x, y0 + y, cell - 1, cell - 1); }
+  }
+}
+
+// one square grid for the page, the same rule as helioswarm.xyz
+function layout() {
+  const vw = root.clientWidth, pad = vw >= 768 ? 40 : 16, n = Math.max(3, Math.round((vw - pad * 2) / 96));
+  G = Math.floor((vw - pad * 2) / n); padL = Math.floor((vw - n * G) / 2); padR = vw - n * G - padL;
+  root.style.setProperty("--g", G + "px"); root.style.setProperty("--padl", padL + "px"); root.style.setProperty("--padr", padR + "px");
+  root.style.setProperty("--side", (n >= 14 ? 5 : 4) * G + "px");
+  rows = vw >= 768 ? Math.max(5, Math.min(6, Math.round((innerHeight * 0.72 - 96 - 40) / G))) : 6;
+  consoleEl.style.minHeight = (96 + rows * G + 40) + "px";
+  lastW = vw;
+}
+
+// ---------- hero: market cap candles and volume, last 30 seconds ----------
+const hv = $("hero"), hg = hv.getContext("2d");
+// Chart ranges: span, candle size, and where the time labels go (seconds before now).
+// ALL spans from the first trade to now, with a candle size picked to give about 90 candles.
+const RANGES = {
+  "30S": { span: 30_000, bucket: 1000, ticks: [30, 20, 10, 0], unit: "1S" },
+  "5M": { span: 300_000, bucket: 10_000, ticks: [300, 240, 180, 120, 60, 0], unit: "10S" },
+  "1H": { span: 3_600_000, bucket: 60_000, ticks: [3600, 2700, 1800, 900, 0], unit: "1M" },
+  "24H": { span: 86_400_000, bucket: 900_000, ticks: [86400, 64800, 43200, 21600, 0], unit: "15M" },
+  "ALL": { span: 3_600_000, bucket: 60_000, ticks: [3600, 2400, 1200, 0], unit: "1M" },
+};
+const SIZES = [[1000, "1S"], [10_000, "10S"], [60_000, "1M"], [300_000, "5M"], [900_000, "15M"], [3_600_000, "1H"], [14_400_000, "4H"], [86_400_000, "1D"]];
+function fitAll() {
+  const R = RANGES.ALL, first = prices.length ? prices[0].t : Date.now() - 3_600_000;
+  const span = Math.max(60_000, (Date.now() - first) * 1.03);
+  const size = SIZES.find((z) => z[0] >= span / 90) || SIZES[SIZES.length - 1];
+  R.bucket = size[0]; R.unit = size[1]; R.span = Math.ceil(span / size[0]) * size[0];
+  const top = Math.round(R.span / 1000); R.ticks = [top, Math.round(top * 2 / 3), Math.round(top / 3), 0];
+  if (range === "ALL") { SPAN = R.span; BUCKET = R.bucket; }
+}
+let range = "ALL";
+try { const r = localStorage.getItem("hs-range"); if (r && RANGES[r]) range = r; } catch (e) {}
+let SPAN = RANGES[range].span, BUCKET = RANGES[range].bucket;
+const tickLabel = (s) => s === 0 ? "NOW" : s < 60 ? "-" + s + "S" : s < 7200 ? "-" + Math.round(s / 60) + "M" : s < 172800 ? "-" + Math.round(s / 3600) + "H" : "-" + Math.round(s / 86400) + "D";
+let HW = 0, HH = 0, vLo = 0, vHi = 0, vMax = 0;
+// Chart view: follow live or a fixed right edge, auto or manual price scale, volume pane share.
+let follow = true, rightT = 0, yAuto = true, yLo = 0, yHi = 0, volFrac = 0.26, hover = null, geo = null, heroBars = [];
+const unitOf = (b) => (SIZES.find((z) => z[0] === b) || [0, Math.round(b / 1000) + "S"])[1];
+const clock = (t) => { const d = new Date(t); return d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: SPAN < 600_000 ? "2-digit" : undefined }); };
+function drawHero() {
+  if (!HW) return;
+  const g = hg;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, HW, HH);
+  crosses(g, HW, HH, padL, 96);
+  starfield(g, HW, HH);
+  const x0 = padL, x1 = HW - padR - G, y0 = 96 + 2 * G, y1 = 96 + rows * G;
+  const vh = Math.round((y1 - y0) * volFrac), cTop = y0, cBot = y1 - vh - 16;
+  const now = Date.now(), right = follow ? now : rightT, from = right - SPAN;
+  const X = (t) => x0 + ((t - from) / SPAN) * (x1 - x0);
+  const bw = (x1 - x0) * BUCKET / SPAN, w = Math.max(3, Math.round(bw * 0.56)), cell = HW < 700 ? 2 : 3;
+  g.font = "10px " + MONO; g.fillStyle = C.dim; g.globalAlpha = 1;
+  g.textBaseline = "top";
+  // time labels: offsets from now while following, clock times once panned back
+  for (let i = 0; i <= 4; i++) {
+    const t = from + (i / 4) * SPAN;
+    g.textAlign = i === 0 ? "left" : i === 4 ? "right" : "center";
+    g.fillText(follow ? tickLabel(Math.round((now - t) / 1000)) : clock(t), x0 + (i / 4) * (x1 - x0), y1 + 12);
+  }
+  g.strokeStyle = C.dim; g.setLineDash([2, 5]); g.beginPath(); g.moveTo(x0, y1 + 0.5); g.lineTo(x1, y1 + 0.5); g.stroke(); g.setLineDash([]);
+  // one-second buckets: OHLC from trade prices, volume from market flow
+  const b0 = Math.floor(from / BUCKET) * BUCKET;
+  let pi = lb(prices, b0), ti = lb(ticks, b0), prev = pi > 0 ? prices[pi - 1].p : null;
+  const bars = [];
+  for (let s = b0; s <= right; s += BUCKET) {
+    let o = prev, c = prev, h = prev, l = prev, n = 0, buy = 0, sell = 0;
+    while (pi < prices.length && prices[pi].t < s + BUCKET) { const p = prices[pi++].p; if (!n) { o = prev ?? p; h = Math.max(o, p); l = Math.min(o, p); } h = Math.max(h, p); l = Math.min(l, p); c = p; n++; }
+    while (ti < ticks.length && ticks[ti].t < s + BUCKET) { const k = ticks[ti++]; if (k.side === "buy") buy += k.sol; else sell += k.sol; }
+    if (c != null) { bars.push({ s, o: mcapOf(o), h: mcapOf(h), l: mcapOf(l), c: mcapOf(c), n, buy, sell }); prev = c; }
+  }
+  if (!bars.length) { g.textAlign = "left"; g.textBaseline = "middle"; g.fillText("> AWAITING TRADES", x0, (y0 + y1) / 2); return; }
+  let lo = Infinity, hi = -Infinity, vm = 0;
+  for (const b of bars) { lo = Math.min(lo, b.l); hi = Math.max(hi, b.h); vm = Math.max(vm, b.buy + b.sell); }
+  const pad = (hi - lo) * 0.2 || hi * 0.004;
+  lo = Math.max(lo - pad, lo * 0.5) + pad; // never let the padding take the scale below zero
+  if (!yAuto) { vLo = yLo; vHi = yHi; vMax = vMax ? vMax + (vm - vMax) * 0.2 : vm; }
+  else if (!vHi) { vLo = lo - pad; vHi = hi + pad; vMax = vm; } else { vLo += (lo - pad - vLo) * 0.08; vHi += (hi + pad - vHi) * 0.08; vMax += (vm - vMax) * 0.08; }
+  geo = { x0, x1, cTop, cBot, y1, vh, from, right, b0 }; heroBars = bars;
+  const Y = (v) => cBot - ((v - vLo) / (vHi - vLo)) * (cBot - cTop);
+  // market cap scale on the grid rows, volume scale at the top of its band
+  g.textAlign = "right"; g.textBaseline = "middle"; g.fillStyle = C.dim;
+  for (let y = y0; y <= cBot + 0.5; y += G) g.fillText(money(vLo + ((cBot - y) / (cBot - cTop)) * (vHi - vLo)), HW - padR - 10, y);
+  g.fillText("VOL " + (vMax ? vMax.toFixed(2) : "0") + " SOL", HW - padR - 10, y1 - vh);
+  g.textAlign = "left"; g.fillText("VOL / " + unitOf(BUCKET), x0, y1 - vh - 8);
+  // volume: dithered bars, buys under sells
+  const vbar = (x, yTop, yBot, col) => {
+    g.fillStyle = col;
+    for (let cy = Math.floor(yTop / cell) * cell; cy < yBot; cy += cell) for (let cx = Math.floor(x / cell) * cell; cx < x + w; cx += cell) if (cx >= x0 && bayer(cx / cell, cy / cell) < 0.62) g.fillRect(cx, cy, cell - 1, cell - 1);
+  };
+  for (const b of bars) {
+    if (!vMax || !(b.buy + b.sell)) continue;
+    const xl = Math.round(X(b.s + BUCKET / 2) - w / 2), hb = (b.buy / vMax) * vh, hs = (b.sell / vMax) * vh;
+    vbar(xl, y1 - hb, y1, C.ice); vbar(xl, y1 - hb - hs, y1 - hb, C.sun);
+  }
+  // candles: filled bodies, one pixel wicks; a quiet second is a dim tick (clipped to the plot when stretched)
+  g.save(); g.beginPath(); g.rect(x0 - 4, cTop - 6, x1 - x0 + 10, cBot - cTop + 12); g.clip();
+  for (const b of bars) {
+    const xc = Math.round(X(b.s + BUCKET / 2)); if (xc - w / 2 < x0 || xc + w / 2 > x1 + 2) continue;
+    if (!b.n) { g.fillStyle = C.dim; g.fillRect(xc - Math.floor(w / 2), Math.round(Y(b.c)), w, 1); continue; }
+    const up = b.c >= b.o, col = up ? C.ice : C.sun, top = Math.round(Y(Math.max(b.o, b.c))), bot = Math.round(Y(Math.min(b.o, b.c)));
+    g.fillStyle = col;
+    g.fillRect(xc, Math.round(Y(b.h)), 1, Math.max(1, Math.round(Y(b.l)) - Math.round(Y(b.h))));
+    g.fillRect(xc - Math.floor(w / 2), top, w, Math.max(2, bot - top));
+  }
+  g.restore();
+  // unit trades: a marker, brackets, and a call sign on a leader
+  let slot = 0;
+  const shown = marks.filter((m) => m.t >= from && m.t <= right), named = HW < 700 ? 3 : range === "30S" ? 12 : 6;
+  shown.forEach((m, mi) => {
+    const label = mi >= shown.length - named;
+    const x = X(m.t), y = Math.max(cTop, Math.min(cBot, Y(mcapOf(m.p)))), col = m.side === "buy" ? C.ice : C.sun, age = (now - m.t) / 1000;
+    const off = 34 + (label ? slot++ % 3 : 0) * 18, ly = m.side === "buy" ? y - off : y + off;
+    // On long ranges older unit trades are small ticks, so the full markers stay readable.
+    if (!label && shown.length > 40) { g.fillStyle = col; g.globalAlpha = 0.8; g.fillRect(Math.round(x) - 1, Math.round(y) - 1, 3, 3); g.globalAlpha = 1; return; }
+    if (label) {
+      g.strokeStyle = col; g.globalAlpha = 0.6; g.beginPath(); g.moveTo(Math.round(x) + 0.5, y); g.lineTo(Math.round(x) + 0.5, ly); g.stroke();
+      g.globalAlpha = 1;
+      const txt = String(m.agent || "").toUpperCase() + (m.side === "buy" ? " [+] " : " [-] ") + fmt(m.sol);
+      const tw = g.measureText(txt).width;
+      const lx = x + tw + 16 > x1 ? Math.round(x) - tw - 12 : Math.round(x) + 4;
+      g.fillStyle = C.bg; g.fillRect(lx, Math.round(ly) - 7, tw + 8, 14);
+      g.fillStyle = col; g.textAlign = "left"; g.textBaseline = "middle"; g.fillText(txt, lx + 4, Math.round(ly) + 0.5);
+    }
+    g.fillStyle = C.bg; g.fillRect(Math.round(x) - 5, Math.round(y) - 5, 10, 10);
+    g.strokeStyle = col; g.strokeRect(Math.round(x) - 3 + 0.5, Math.round(y) - 3 + 0.5, 6, 6);
+    brackets(g, x, y, 9, col);
+    if (age < 1.6) for (let i = 0; i < 2; i++) {
+      const rr = 12 + ((age * 30 + i * 16) % 32);
+      g.globalAlpha = Math.max(0, 1 - (rr - 12) / 32) * (1 - age / 1.6); g.beginPath(); g.arc(x, y, rr, 0, Math.PI * 2); g.stroke();
+    }
+    g.globalAlpha = 1;
+  });
+  // the live head: a small dithered sun on the last close, its market cap carried to the scale
+  const last = bars[bars.length - 1].c, hy = Math.round(Y(last));
+  if (follow && hy >= cTop - 4 && hy <= cBot + 4) {
+  g.strokeStyle = C.sun; g.globalAlpha = 0.5; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(x1 + 8, hy + 0.5); g.lineTo(HW - padR - 76, hy + 0.5); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+  ditherSun(g, x1 + 8, hy, 4, 20, 3, false, mapT); ditherSun(g, x1 + 8, hy, 4, 20, 3, true, mapT);
+  const lbl = money(last);
+  g.font = "10px " + MONO; const lw = g.measureText(lbl).width;
+  g.fillStyle = C.bg; g.fillRect(HW - padR - lw - 8, hy - 8, lw + 8, 16);
+  g.strokeStyle = C.sun; g.strokeRect(HW - padR - lw - 8 + 0.5, hy - 8 + 0.5, lw + 7, 15);
+  g.fillStyle = C.sun; g.textAlign = "right"; g.textBaseline = "middle"; g.fillText(lbl, HW - padR - 4, hy + 0.5);
+  }
+  // crosshair: dashed guides, the value and time on the axes, and the candle under it
+  if (hover && hover.x >= x0 && hover.x <= x1 && hover.y >= cTop && hover.y <= y1) {
+    const hx = Math.round(hover.x) + 0.5, hyy = Math.round(hover.y) + 0.5, t = from + ((hover.x - x0) / (x1 - x0)) * SPAN;
+    g.strokeStyle = C.muted; g.globalAlpha = 0.6; g.setLineDash([2, 4]); g.beginPath();
+    g.moveTo(hx, cTop); g.lineTo(hx, y1); if (hover.y <= cBot) { g.moveTo(x0, hyy); g.lineTo(x1, hyy); } g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    g.font = "10px " + MONO; g.textBaseline = "middle";
+    const box = (txt, x, y, align) => { const tw = g.measureText(txt).width, bx = align === "right" ? x - tw - 8 : align === "center" ? x - tw / 2 - 4 : x; g.fillStyle = C.bg; g.fillRect(bx, y - 8, tw + 8, 16); g.strokeStyle = C.muted; g.strokeRect(bx + 0.5, y - 7.5, tw + 7, 15); g.fillStyle = C.fg; g.textAlign = "left"; g.fillText(txt, bx + 4, y + 0.5); };
+    if (hover.y <= cBot) box(money(vLo + ((cBot - hover.y) / (cBot - cTop)) * (vHi - vLo)), HW - padR, hyy, "right");
+    box(clock(t), Math.max(x0 + 40, Math.min(x1 - 40, hx)), y1 + 18, "center");
+    const bs = Math.floor(t / BUCKET) * BUCKET, b = bars[lb(bars.map((q) => ({ t: q.s })), bs)];
+    if (b && b.s === bs) {
+      const up = b.c >= b.o, parts = [["O", money(b.o)], ["H", money(b.h)], ["L", money(b.l)], ["C", money(b.c)], ["VOL", (b.buy + b.sell).toFixed(2) + " SOL"]];
+      let x = x0; g.textAlign = "left";
+      for (const [k, v] of parts) { g.fillStyle = C.dim; g.fillText(k, x, cTop - 14); x += g.measureText(k + " ").width; g.fillStyle = k === "VOL" ? C.fg : up ? C.ice : C.sun; g.fillText(v, x, cTop - 14); x += g.measureText(v + "   ").width; }
+    }
+  }
+}
+
+// ---------- chart controls: drag to pan, ctrl/pinch/buttons to zoom, drag the scale to stretch ----------
+function setCustom() {
+  if (range === "CUSTOM") return;
+  range = "CUSTOM";
+  document.querySelectorAll(".rng button[data-r]").forEach((b) => { b.classList.remove("on"); b.setAttribute("aria-pressed", "false"); });
+}
+function syncLive() { $("goLive").hidden = follow; $("rngLbl").textContent = range === "CUSTOM" ? unitOf(BUCKET) : range; }
+function zoom(f, ax) {
+  if (!geo) return;
+  const now = Date.now(), { x0, x1 } = geo, right = follow ? now : rightT, from = right - SPAN;
+  const frac = ax == null ? 1 : Math.max(0, Math.min(1, (ax - x0) / (x1 - x0))), tA = from + frac * SPAN;
+  const first = prices.length ? prices[0].t : now - 3_600_000;
+  let span = Math.max(BUCKET * 8, Math.min(SPAN * f, Math.max(3_600_000, (now - first) * 1.5)));
+  let i = SIZES.findIndex((z) => z[0] === BUCKET); if (i < 0) i = 2;
+  while (span / SIZES[i][0] > 200 && i < SIZES.length - 1) i++;
+  while (span / SIZES[i][0] < 16 && i > 0) i--;
+  BUCKET = SIZES[i][0]; span = Math.max(BUCKET * 8, span);
+  const nr = tA + (1 - frac) * span;
+  follow = nr >= now - BUCKET; rightT = follow ? now : nr; SPAN = span;
+  setCustom(); syncLive(); stats(); drawHero();
+}
+function resetView() { follow = true; yAuto = true; vHi = 0; volFrac = 0.26; setRange(range === "CUSTOM" ? "ALL" : range); }
+let drag = null;
+const pinch = new Map();
+function zoneAt(x, y) {
+  if (!geo) return null;
+  const { x0, x1, cTop, y1, vh } = geo, dv = y1 - vh - 8;
+  if (x >= x0 && x <= x1 && Math.abs(y - dv) < 7) return "vol";
+  if (x > x1 && y >= cTop && y <= y1) return "scale";
+  if (x >= x0 && x <= x1 && y >= cTop - 24 && y <= y1 + 24) return "pan";
+  return null;
+}
+const heroPt = (e) => { const r = hv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+hv.addEventListener("pointerdown", (e) => {
+  const p = heroPt(e), z = zoneAt(p.x, p.y);
+  if (e.pointerType === "touch") { pinch.set(e.pointerId, p); if (pinch.size === 2) { const [a, b] = [...pinch.values()]; drag = { kind: "pinch", d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2 }; return; } }
+  if (!z) return;
+  hv.setPointerCapture(e.pointerId);
+  if (z === "scale" && yAuto) { yAuto = false; yLo = vLo; yHi = vHi; }
+  drag = { kind: z, x: p.x, y: p.y, right: follow ? Date.now() : rightT, lo: yAuto ? vLo : yLo, hi: yAuto ? vHi : yHi, frac: volFrac };
+});
+hv.addEventListener("pointermove", (e) => {
+  const p = heroPt(e);
+  if (e.pointerType === "touch" && pinch.has(e.pointerId)) pinch.set(e.pointerId, p);
+  hover = e.pointerType === "touch" ? null : p;
+  if (!drag) { const z = zoneAt(p.x, p.y); hv.style.cursor = z === "vol" ? "row-resize" : z === "scale" ? "ns-resize" : z === "pan" ? "crosshair" : ""; if (!running) drawHero(); return; }
+  const g = geo, w = g.x1 - g.x0, hgt = g.cBot - g.cTop;
+  if (drag.kind === "pinch" && pinch.size === 2) { const [a, b] = [...pinch.values()], d = Math.hypot(a.x - b.x, a.y - b.y); if (d > 10) { zoom(drag.d / d, drag.mx); drag.d = d; } return; }
+  if (drag.kind === "pan") {
+    hv.style.cursor = "grabbing";
+    const nr = drag.right - ((p.x - drag.x) / w) * SPAN, now = Date.now();
+    follow = nr >= now; rightT = follow ? now : nr;
+    if (!yAuto) { const dv = ((p.y - drag.y) / hgt) * (drag.hi - drag.lo); yLo = drag.lo + dv; yHi = drag.hi + dv; }
+    setCustom(); syncLive();
+  } else if (drag.kind === "scale") {
+    const f = Math.exp((p.y - drag.y) * 0.006), mid = (drag.lo + drag.hi) / 2, half = ((drag.hi - drag.lo) / 2) * f;
+    yLo = mid - half; yHi = mid + half;
+  } else if (drag.kind === "vol") {
+    volFrac = Math.max(0.08, Math.min(0.6, (g.y1 - p.y) / (g.y1 - g.cTop)));
+  }
+  if (!running) drawHero();
+});
+const endDrag = (e) => { pinch.delete(e.pointerId); if (drag && (drag.kind !== "pinch" || pinch.size < 2)) drag = null; hv.style.cursor = ""; };
+hv.addEventListener("pointerup", endDrag);
+hv.addEventListener("pointercancel", endDrag);
+hv.addEventListener("pointerleave", () => { hover = null; if (!running) drawHero(); });
+hv.addEventListener("dblclick", (e) => { const p = heroPt(e); if (zoneAt(p.x, p.y) === "scale") { yAuto = true; vHi = 0; drawHero(); } else resetView(); });
+// Plain scrolling keeps scrolling the page; pinch on a trackpad (ctrlKey) or ctrl/cmd + wheel zooms, sideways scroll pans.
+hv.addEventListener("wheel", (e) => {
+  if (!geo) return;
+  const p = heroPt(e);
+  if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoom(Math.exp(e.deltaY * 0.01), p.x); }
+  else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && zoneAt(p.x, p.y) === "pan") {
+    e.preventDefault();
+    const now = Date.now(), nr = (follow ? now : rightT) + (e.deltaX / (geo.x1 - geo.x0)) * SPAN;
+    follow = nr >= now; rightT = follow ? now : nr; setCustom(); syncLive(); if (!running) drawHero();
+  }
+}, { passive: false });
+
+// ---------- swarm map ----------
+const cv = $("swarm"), ctx = cv.getContext("2d"), card = $("callout");
+let rot = -0.32, sq = 0.46, W = 0, H = 0, U = 0, cx = 0, cy = 0, rings = 3;
+function orbitSetup() {
+  const rank = (c) => { const i = RING_ORDER.indexOf(c); return i < 0 ? 99 : i; };
+  const classes = [...new Set([...agents.values()].map((a) => a.preset))].sort((a, b) => rank(a) - rank(b));
+  rings = Math.max(3, classes.length);
+  const per = {};
+  for (const a of agents.values()) (per[a.preset] = per[a.preset] || []).push(a);
+  classes.forEach((c, ci) => {
+    const t = PRESETS[c] || { risk: 140, patience: 120, contrarian: 100 };
+    const ring = classes.length < rings ? Math.round((ci + 0.5) * rings / classes.length - 0.5) : ci;
+    per[c].forEach((a, k) => {
+      a.ring = ring;
+      a.ang = (k / per[c].length) * Math.PI * 2 + ci * 0.9 + rnd() * 0.4;
+      a.w = (0.04 + (1 - t.patience / 255) * 0.18) * (t.contrarian > 128 ? -1 : 1) * (0.85 + rnd() * 0.3);
+      a.amp = t.risk / 255 * 0.06; a.ph = rnd() * 6.28; a.flashT = -9; a.x = 0; a.y = 0;
+    });
+  });
+}
+function ringRx(i) { return U * (0.16 + 0.3 * i / Math.max(1, rings - 1)); }
+function place(a) {
+  const rx = ringRx(a.ring) * (1 + a.amp * Math.sin(a.ang * 3 + a.ph + mapT * 0.7)), ry = rx * sq;
+  const px = rx * Math.cos(a.ang), py = ry * Math.sin(a.ang);
+  a.x = cx + px * Math.cos(rot) - py * Math.sin(rot); a.y = cy + px * Math.sin(rot) + py * Math.cos(rot);
+}
+function resize() {
+  if (root.clientWidth !== lastW) layout();
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  const r = consoleEl.getBoundingClientRect();
+  HW = r.width; HH = r.height; hv.width = Math.round(HW * dpr); hv.height = Math.round(HH * dpr);
+  const m = mapEl.getBoundingClientRect();
+  W = m.width; H = m.height; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cx = Math.round(W / 2); cy = Math.round(H / 2);
+  U = Math.min(W * 0.46, (H * 0.5) / sq) / 0.46;
+  drawHero(); drawMap();
+}
+function drawMap() {
+  if (!W) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+  crosses(ctx, W, H, 0, 0);
+  starfield(ctx, W, H);
+  const list = [...agents.values()];
+  for (const a of list) place(a);
+  ctx.strokeStyle = C.muted; ctx.globalAlpha = 0.13; ctx.beginPath();
+  for (const a of list) { ctx.moveTo(a.x, a.y); ctx.lineTo(cx, cy); }
+  ctx.stroke();
+  for (let i = 0; i < rings; i++) { const rx = ringRx(i); ctx.strokeStyle = C.dim; ctx.globalAlpha = 0.7; ctx.setLineDash(i % 2 ? [2, 5] : []); ctx.beginPath(); ctx.ellipse(cx, cy, rx, rx * sq, rot, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.setLineDash([]); ctx.globalAlpha = 1;
+  const cell = W < 700 ? 3 : 4;
+  ditherSun(ctx, cx, cy, U * 0.028, U * 0.12, cell, false, mapT);
+  for (const p of pulses) { const age = mapT - p, pr = U * 0.55 * age / 2.4; ctx.strokeStyle = C.sun; ctx.globalAlpha = Math.max(0, 1 - age / 2.4); ctx.beginPath(); ctx.ellipse(cx, cy, pr, pr * sq, rot, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.globalAlpha = 1;
+  const size = W < 700 ? 5 : 6, names = list.length <= 16;
+  ctx.font = "10px " + MONO; ctx.textBaseline = "middle"; ctx.textAlign = "left";
+  for (const a of list) {
+    const f = mapT - a.flashT, col = a.flash === "buy" ? C.ice : a.flash === "sell" ? C.sun : C.fg;
+    if (f > 0 && f < 1.2) {
+      const k = f / 1.2;
+      ctx.strokeStyle = col; ctx.globalAlpha = 1 - k; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(cx, cy); ctx.stroke();
+      ctx.fillStyle = col; ctx.globalAlpha = 1; ctx.fillRect(Math.round(a.x + (cx - a.x) * k) - 1, Math.round(a.y + (cy - a.y) * k) - 1, 3, 3);
+    }
+    const hx = Math.round(a.x - size / 2), hy = Math.round(a.y - size / 2);
+    ctx.globalAlpha = 1; ctx.fillStyle = C.bg; ctx.fillRect(hx - 1, hy - 1, size + 2, size + 2);
+    if (!a.flash) { ctx.strokeStyle = C.fg; ctx.strokeRect(hx + 0.5, hy + 0.5, size - 1, size - 1); } else { ctx.fillStyle = col; ctx.fillRect(hx, hy, size, size); }
+    let alpha = names ? 0.75 : 0;
+    if (pointer) { const d = Math.hypot(a.x - pointer.x, a.y - pointer.y); if (d < 150) alpha = Math.max(alpha, (1 - d / 150) * 0.9); }
+    if (alpha > 0 && a.id !== hoverId) { ctx.globalAlpha = alpha; ctx.fillStyle = a.flash ? col : C.muted; ctx.fillText(String(a.id).toUpperCase(), a.x + size + 5, a.y + 0.5); }
+  }
+  ctx.globalAlpha = 1;
+  ditherSun(ctx, cx, cy, U * 0.028, U * 0.12, cell, true, mapT);
+  const fa = hoverId ? agents.get(hoverId) : null;
+  if (fa) brackets(ctx, fa.x, fa.y, size + 6, C.fg);
+  placeCard(fa);
+}
+function setCard(a) {
+  if (!a) { if (cardKey) { cardKey = ""; card.className = "callout"; } return; }
+  const e = equityOf(a), st = a.flash || "hold";
+  const key = a.id + st + fmt(a.cash) + a.tokens + (a.last || "") + e.pnl.toFixed(4);
+  if (key === cardKey) return;
+  cardKey = key;
+  card.className = "callout on" + (a.flash === "sell" ? " alert" : a.flash === "buy" ? " ok" : "");
+  card.innerHTML = '<div class="callout-head"><span class="label">Unit :: ' + esc(a.preset) + '</span><span class="label ' + (st === "buy" ? "ice" : st === "sell" ? "sun" : "") + '">[ ' + st + " ]</span></div>" +
+    '<p class="callout-title">' + esc(a.id) + "</p>" +
+    "<dl><dt>SOL</dt><dd>" + fmt(a.cash) + "</dd><dt>Holding</dt><dd>" + (a.tokens > 0 ? big(a.tokens) : "—") + "</dd><dt>P&amp;L</dt><dd class='" + (e.pnl >= 0 ? "ice" : "sun") + "'>" + signed(e.pnl) + "</dd></dl>" +
+    '<p class="label dim">&gt; ' + (a.last ? esc(a.last) : "watching") + "</p>";
+}
+function placeCard(a) {
+  setCard(a);
+  if (!a) return;
+  const cw = card.offsetWidth, ch = card.offsetHeight;
+  let x = a.x + 22, y = a.y - ch - 14;
+  if (x + cw > W - 8) x = a.x - cw - 22;
+  if (y < 8) y = a.y + 22;
+  x = Math.max(8, Math.min(W - cw - 8, x)); y = Math.max(8, Math.min(H - ch - 8, y));
+  card.style.transform = "translate(" + Math.round(x) + "px," + Math.round(y) + "px)";
+}
+function setStatus(text, alert) { const el = $("mStatus"); el.textContent = text; el.className = alert ? "alert" : ""; }
+function pick() {
+  let best = null, bd = 26 * 26;
+  for (const a of agents.values()) { const d = (a.x - pointer.x) ** 2 + (a.y - pointer.y) ** 2; if (d < bd) { bd = d; best = a; } }
+  setHover(best ? best.id : null);
+}
+function setHover(id) { if (id === hoverId) return; hoverId = id; for (const r of $("agents").children) r.classList.toggle("hl", !!id && r.dataset.id === id); }
+function at(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+mapEl.addEventListener("pointermove", (e) => { pointer = at(e); pick(); if (!running) drawMap(); });
+mapEl.addEventListener("pointerleave", () => { pointer = null; setHover(null); if (!running) drawMap(); });
+$("agents").addEventListener("pointerover", (e) => { const r = e.target.closest(".urow[data-id]"); setHover(r ? r.dataset.id : null); if (!running) drawMap(); });
+$("agents").addEventListener("pointerleave", () => { setHover(null); if (!running) drawMap(); });
+
+let last = 0, running = false, heroVis = true, mapVis = true;
+function frame(now) {
+  if (!running) return;
+  const dt = Math.min(0.05, (now - last) / 1000 || 0); last = now; mapT += dt;
+  for (const a of agents.values()) a.ang += a.w * dt;
+  while (pulses.length && mapT - pulses[0] > 2.4) pulses.shift();
+  if (status && mapT > status) { status = null; setStatus("NOMINAL", false); }
+  if (heroVis) drawHero();
+  if (mapVis) drawMap();
+  requestAnimationFrame(frame);
+}
+function setRunning(on) { on = on && !reduce && !document.hidden; if (on && !running) { running = true; last = performance.now(); requestAnimationFrame(frame); } else if (!on) running = false; }
 
 function onEvent(l) {
   const ts = l.ts;
@@ -337,40 +1018,79 @@ function onEvent(l) {
     }
     case "fill": {
       const a = agents.get(l.agent);
-      const buy = l.side === "buy";
+      const buy = l.side === "buy", t = tOf(l);
       agentTrades++;
-      if (a) {
+      // Past fills (hist) go on the chart and in the feed; balances already include them.
+      if (a && !l.hist) {
         if (buy) { a.cash -= Number(l.sol); a.tokens += Number(l.tokens); } else { a.cash += Number(l.sol); a.tokens = Math.max(0, a.tokens - Number(l.tokens)); }
         a.last = (buy ? "bought " : "sold ") + fmt(l.sol) + " SOL" + (l.reason && l.reason !== "on-chain" ? " · " + l.reason : "");
-        a.flash = buy ? "buy" : "sell"; setTimeout(() => { a.flash = null; renderAgents(); }, 1800);
+        a.flash = buy ? "buy" : "sell"; a.flashT = mapT;
+        clearTimeout(a.flashTimer); a.flashTimer = setTimeout(() => { a.flash = null; renderAgents(); if (!running) drawMap(); }, 2400);
       }
-      if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; marks.push({ t: Date.now(), p: lastPrice, side: l.side }); prices.push({ t: Date.now(), p: lastPrice }); }
+      if (l.priceSol) { const p = Number(l.priceSol), ok = gate(p, Number(l.sol)); if (ok) addPrice(t, p); if (lastPrice) ins(marks, { t, p: ok ? p : lastPrice, side: l.side, agent: l.agent, sol: Number(l.sol) }); }
       const link = l.sig && l.sig !== "paper" ? ' <a href="https://solscan.io/tx/' + l.sig + '" target="_blank" rel="noopener">tx ↗</a>' : ' <span class="dim">paper</span>';
       add("swarm", '<span class="who">' + esc(l.agent) + '</span> <span class="k ' + (buy ? "buy" : "sell") + '">' + (buy ? "buy" : "sell") + "</span> " + fmt(l.sol) + " SOL <span class='dim'>" + big(Number(l.tokens)) + " " + esc(sym(l.mint)) + (l.reason && l.reason !== "on-chain" ? " · " + esc(l.reason) : "") + "</span>" + link, ts, "swarm");
-      renderAgents(); stats(); return;
+      if (!syncing) { renderAgents(); stats(); }
+      return;
     }
     case "refused": { const a = agents.get(l.agent); if (a) { a.last = "skip: " + l.why; renderAgents(); } return; }
     case "signal": {
       add("", '<span class="sig ' + (l.severity === "high" ? "" : "low") + '">' + esc(SIG[l.kind] || l.kind) + "</span>" + esc((l.reasons || []).join(" · ")), ts, "swarm");
+      pulses.push(mapT); setStatus("SIGNAL :: " + String(l.kind || "").toUpperCase(), l.severity === "high"); status = mapT + 6;
       return;
     }
     case "flow": {
       if (l.kind !== "buy" && l.kind !== "sell") return;
-      const buy = l.kind === "buy";
-      if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; prices.push({ t: Date.now(), p: lastPrice }); if (prices.length > 4000) prices.shift(); }
-      mkt.push({ t: Date.now(), s: l.kind });
+      const buy = l.kind === "buy", t = tOf(l);
+      if (l.priceSol && gate(Number(l.priceSol), Number(l.sol))) { const p = Number(l.priceSol); addPrice(t, p); ins(ticks, { t, p, side: l.kind, sol: Number(l.sol) }); }
+      ins(mkt, { t, s: l.kind, sol: Number(l.sol) || 0 });
       if (l.seenEarlyMs != null && l.seenEarlyMs >= 0) early.push(l.seenEarlyMs);
       const e = l.seenEarlyMs != null && l.seenEarlyMs >= 0 ? ' <span class="early">⚡' + l.seenEarlyMs + "ms</span>" : "";
       add("market", '<span class="k ' + (buy ? "buy" : "sell") + '">' + (buy ? "buy" : "sell") + "</span> " + fmt(l.sol) + " SOL <span class='dim'>" + big(Number(l.tokens)) + " · " + short(l.owner) + "</span>" + e, ts, "market");
-      stats(); return;
+      if (!syncing) stats();
+      return;
     }
     case "pending": {
       if (l.kind !== "buy" && l.kind !== "sell") return;
       add("market", '<span class="early">⏳ incoming</span> <span class="k ' + l.kind + '">' + l.kind + '</span> <span class="dim">' + short(l.owner) + " · " + esc(l.venue) + " · not executed yet</span>", ts, "early");
       return;
     }
+    case "synced": { syncing = false; since = Number(l.since) || Date.now(); fitAll(); renderAgents(); stats(); drawHero(); loadTrades(); return; }
+    case "backfill": { clearTimeout(tradesTimer); tradesTimer = setTimeout(loadTrades, 1500); return; }
+    case "solusd": { solUsd = Number(l.usd) > 0 ? Number(l.usd) : null; stats(); return; }
     case "task_error": { const a = agents.get(l.agent); if (a) { a.last = "error: " + String(l.error).slice(0, 80); renderAgents(); } return; }
   }
+}
+
+// Trades older than the replayed hour, in one compact request: the chart's long ranges and the trade count.
+let since = 0, oldFills = 0, tradesTimer = 0, tradesBusy = false;
+async function loadTrades() {
+  if (tradesBusy || !since) return;
+  tradesBusy = true;
+  try {
+    const res = await fetch("trades?before=" + since, { cache: "no-store" });
+    if (!res.ok) return;
+    const d = await res.json(), cut = Number(d.before) || since;
+    const keep = (a) => a.slice(lb(a, cut));
+    const P = [], T = [], M = [];
+    // Flows and fills in time order through a fresh gate, so outliers in old history are dropped too.
+    const all = d.flows.map((f) => [f[0], 0, f]).concat(d.fills.map((f) => [f[0], 1, f])).sort((a, b) => a[0] - b[0]);
+    const g = makeGate(); let last = 0;
+    for (const [t, fill, f] of all) {
+      const p = fill ? f[4] : f[3], sol = fill ? f[3] : f[2], ok = g(p, sol);
+      if (ok) { P.push({ t, p }); last = p; }
+      if (fill) { if (last) M.push({ t, p: ok ? p : last, side: f[2] ? "buy" : "sell", agent: f[1], sol }); }
+      else if (ok) T.push({ t, p, side: f[1] ? "buy" : "sell", sol });
+    }
+    const np = P.concat(keep(prices)), nt = T.concat(keep(ticks)), nm = M.concat(keep(marks));
+    prices.length = 0; ticks.length = 0; marks.length = 0;
+    for (const x of np) prices.push(x); for (const x of nt) ticks.push(x); for (const x of nm) marks.push(x);
+    if (prices.length) lastPrice = prices[prices.length - 1].p;
+    agentTrades += d.fills.length - oldFills; oldFills = d.fills.length;
+    fitAll(); stats(); drawHero();
+  } catch (e) {
+    /* the chart keeps what it has */
+  } finally { tradesBusy = false; }
 }
 
 function connect() {
@@ -378,26 +1098,51 @@ function connect() {
   es.addEventListener("info", (m) => {
     info = JSON.parse(m.data);
     agents.clear();
+    // A reconnect replays the whole history, so start the chart and counters clean.
+    for (const a of [prices, marks, ticks, mkt, early]) a.length = 0;
+    agentTrades = 0; lastPrice = 0; syncing = true; vHi = 0; oldFills = 0; since = 0; gate = makeGate();
     for (const a of info.agents) agents.set(a.id, { ...a, cash: a.bankrollSol, start: a.bankrollSol, tokens: 0, last: "" });
+    orbitSetup();
     const t = info.tokens[0];
     if (t) { $("sym").textContent = t.symbol || short(t.mint); $("mTarget").textContent = (t.symbol || "") + " " + short(t.mint); $("mintLink").href = "https://solscan.io/token/" + t.mint; }
     const presets = new Set(info.agents.map((a) => a.preset));
-    $("mUnits").textContent = info.agents.length + " / " + presets.size + " CLASSES";
-    $("mMode").innerHTML = info.mode === "live" ? '<span class="sun">LIVE · REAL SOL</span>' : info.mode === "paper" ? "PAPER" : "WATCH";
-    $("feed").innerHTML = '<div class="empty">Waiting for activity…</div>';
-    renderAgents();
+    $("mUnits").textContent = String(info.agents.length).padStart(2, "0") + " / " + presets.size + (presets.size === 1 ? " CLASS" : " CLASSES");
+    $("mMode").innerHTML = info.mode === "live" ? '<span class="sun">LIVE :: REAL SOL</span>' : info.mode === "paper" ? "PAPER" : "WATCH";
+    $("feed").innerHTML = '<div class="empty">Awaiting activity</div>';
+    renderAgents(); drawMap();
   });
   es.onmessage = (m) => onEvent(JSON.parse(m.data));
   es.onopen = () => { $("conn").classList.add("on"); $("connTxt").textContent = "live"; };
   es.onerror = () => { $("conn").classList.remove("on"); $("connTxt").textContent = "reconnecting"; };
 }
+function setRange(r) {
+  range = r; fitAll(); SPAN = RANGES[r].span; BUCKET = RANGES[r].bucket; vHi = 0;
+  document.querySelectorAll(".rng button[data-r]").forEach((b) => { b.classList.toggle("on", b.dataset.r === r); b.setAttribute("aria-pressed", String(b.dataset.r === r)); });
+  $("rngLbl").textContent = r;
+  $("hero").setAttribute("aria-label", "Market cap and volume " + (r === "30S" ? "over the last 30 seconds" : r === "5M" ? "over the last 5 minutes" : r === "1H" ? "over the last hour" : r === "24H" ? "over the last 24 hours" : "since launch") + ", with every unit trade marked.");
+  try { localStorage.setItem("hs-range", r); } catch (e) {}
+  syncLive(); stats(); drawHero();
+}
+document.querySelectorAll(".rng button[data-r]").forEach((b) => b.onclick = () => { follow = true; yAuto = true; setRange(b.dataset.r); });
+$("zIn").onclick = () => zoom(1 / 1.6, null);
+$("zOut").onclick = () => zoom(1.6, null);
+$("zReset").onclick = resetView;
+$("goLive").onclick = () => { follow = true; syncLive(); drawHero(); };
 document.querySelectorAll(".tabs .btn").forEach((b) => b.onclick = () => {
   document.querySelectorAll(".tabs .btn").forEach((x) => x.classList.toggle("on", x === b));
   filter = b.dataset.f;
   for (const ev of $("feed").children) ev.style.display = filter === "all" || ev.dataset.kind === filter ? "" : "none";
 });
-setInterval(() => { drawChart(); stats(); }, 1000);
-addEventListener("resize", drawChart);
+setInterval(() => { fitAll(); stats(); if (!running) drawHero(); }, 1000);
+if ("ResizeObserver" in window) { const ro = new ResizeObserver(resize); ro.observe(consoleEl); ro.observe(mapEl); } else addEventListener("resize", resize);
+layout(); resize(); setRange(range);
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { drawHero(); drawMap(); });
+if ("IntersectionObserver" in window) {
+  new IntersectionObserver((es) => { heroVis = es[0].isIntersecting; }).observe(consoleEl);
+  new IntersectionObserver((es) => { mapVis = es[0].isIntersecting; }).observe(mapEl);
+}
+document.addEventListener("visibilitychange", () => setRunning(true));
+setRunning(true);
 connect();
 </script>
 </body>
