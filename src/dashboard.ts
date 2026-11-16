@@ -112,9 +112,8 @@ a { color: inherit; }
 .btn.solid { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 .btn.solid:hover { background: var(--sun); border-color: var(--sun); }
 
-/* console: the swarm map fills it, type sits in the corners */
+/* console: the 30 second chart fills it, readouts sit in the corners */
 .console { position: relative; z-index: 2; overflow: hidden; border-bottom: 1px solid var(--line); min-height: 640px; display: flex; }
-#swarm { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .overlay { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto 1fr auto; gap: 24px;
   padding: var(--top) max(var(--padr), env(safe-area-inset-right, 0px)) 40px max(var(--padl), env(safe-area-inset-left, 0px)); pointer-events: none; }
 .meta { align-self: start; margin: 0; padding-top: 8px; font-family: var(--mono); font-size: 12px; line-height: 20px; letter-spacing: 0.04em; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
@@ -123,11 +122,7 @@ a { color: inherit; }
 .clock { padding-top: 8px; text-align: right; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; font-family: var(--mono); font-size: 12px; line-height: 20px; letter-spacing: 0.04em; }
 .clock strong { font-weight: 400; color: var(--fg); font-variant-numeric: tabular-nums; }
 .legend { display: none; color: var(--muted); white-space: pre; }
-.title { grid-row: 3; grid-column: 1 / -1; align-self: end; }
-h1 { font-size: 30px; line-height: 36px; letter-spacing: -0.01em; font-weight: 500; text-transform: uppercase; }
-h1 span { display: block; color: var(--muted); }
-@media (min-width: 768px) { .legend { display: block; } h1 { font-size: 36px; line-height: 40px; } }
-@media (min-width: 1024px) { h1 { font-size: 48px; line-height: 1; } }
+@media (min-width: 768px) { .legend { display: block; } }
 
 /* readouts: one row on the grid, no boxes */
 .readouts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
@@ -142,7 +137,13 @@ h1 span { display: block; color: var(--muted); }
 .block { padding: 32px 0; border-bottom: 1px solid var(--line); }
 .block:last-child { border-bottom: 0; }
 .head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; min-height: 34px; }
-#chart { width: 100%; height: 232px; display: block; }
+#hero { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.mapbox { position: relative; height: 360px; overflow: hidden; }
+#swarm { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+@media (max-width: 759px) { .mapbox { height: 300px; } }
+.clock .btn { pointer-events: auto; margin-top: 8px; }
+.pair { white-space: nowrap; }
+@media (max-width: 767px) { .clock .pair, .clock .btn { display: none; } }
 
 /* units: a table on wide screens, stacked rows on narrow ones */
 .units { display: flex; flex-direction: column; }
@@ -225,8 +226,7 @@ footer { position: relative; z-index: 2; border-top: 1px solid var(--line); }
 
 <main>
 <section class="console" id="console">
-  <canvas id="swarm" role="img" aria-label="The swarm's units as squares orbiting a dithered sun. A unit lights up when it trades."></canvas>
-  <div class="callout" id="callout" aria-hidden="true"></div>
+  <canvas id="hero" role="img" aria-label="Price over the last 30 seconds, with every unit trade marked on the line."></canvas>
   <div class="overlay">
 <pre class="meta">SWARM ....... <b>HELIOS-01</b>
 UNITS ....... <b id="mUnits">-</b>
@@ -236,8 +236,9 @@ STATUS ...... <b id="mStatus">NOMINAL</b></pre>
     <div class="clock">
       <strong id="clock">T+0000</strong>
       <span class="legend" aria-hidden="true">[ ] HOLD   <span class="ice">[+] BUY</span>   <span class="sun">[-] SELL</span></span>
+      <span class="label pair"><b id="sym">-</b> / SOL &nbsp;<span id="chg"></span> <span class="dim">:: 30S</span></span>
+      <a class="btn" id="mintLink" target="_blank" rel="noopener">Token</a>
     </div>
-    <div class="title"><h1>Many minds.<span>Trading live.</span></h1></div>
   </div>
 </section>
 
@@ -253,12 +254,15 @@ STATUS ...... <b id="mStatus">NOMINAL</b></pre>
   <div class="panes">
     <div class="pane">
       <section class="block">
-        <div class="head"><span class="label">Units <b id="agentCount"></b></span><span class="label dim sub">Own mind :: own wallet :: one board</span></div>
-        <div class="units" id="agents"></div>
+        <div class="head"><span class="label">Swarm map</span><span class="label dim sub">Own mind :: own wallet :: one board</span></div>
+        <div class="mapbox" id="mapbox">
+          <canvas id="swarm" role="img" aria-label="The swarm's units as squares orbiting a dithered sun. A unit lights up when it trades."></canvas>
+          <div class="callout" id="callout" aria-hidden="true"></div>
+        </div>
       </section>
       <section class="block">
-        <div class="head"><span class="label"><b id="sym">-</b> / SOL &nbsp;<span id="chg"></span> <span class="dim">:: 10m</span></span><a class="btn" id="mintLink" target="_blank" rel="noopener">Token</a></div>
-        <canvas id="chart"></canvas>
+        <div class="head"><span class="label">Units <b id="agentCount"></b></span></div>
+        <div class="units" id="agents"></div>
       </section>
     </div>
     <div class="pane">
@@ -293,7 +297,7 @@ const RING_ORDER = ["degen", "showman", "holder", "contrarian", "momentum", "sni
 
 let info = null, filter = "all";
 const agents = new Map();
-const prices = [], marks = [], mkt = [], early = [];
+const prices = [], marks = [], ticks = [], mkt = [], early = [];
 let agentTrades = 0, lastPrice = 0, firstPrice = 0;
 let pointer = null, hoverId = null, pulses = [], status = null, cardKey = "";
 const t0 = Date.now();
@@ -329,29 +333,6 @@ function renderAgents() {
   $("sPnl").innerHTML = start ? '<span class="' + (p >= 0 ? "ice" : "sun") + '">' + signed(p) + "</span>" : "—";
 }
 
-function drawChart() {
-  const c = $("chart"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
-  c.width = w * dpr; c.height = h * dpr;
-  const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
-  const now = Date.now(), from = now - 10 * 60_000, axis = 72, pw = w - axis;
-  g.font = "10px 'Geist Mono', monospace"; g.textBaseline = "middle";
-  const pts = prices.filter((p) => p.t >= from);
-  if (pts.length < 2) { g.fillStyle = "#5B5F66"; g.fillText("> AWAITING TRADES", 4, h / 2); return; }
-  let lo = Math.min(...pts.map((p) => p.p)), hi = Math.max(...pts.map((p) => p.p));
-  if (hi === lo) { hi *= 1.01; lo *= 0.99; }
-  const x = (t) => ((t - from) / (now - from)) * (pw - 8) + 4;
-  const y = (p) => 12 + (1 - (p - lo) / (hi - lo)) * (h - 24);
-  g.fillStyle = "#5B5F66"; g.textAlign = "right";
-  for (let r = 0; r <= 4; r++) { const v = hi - (r / 4) * (hi - lo); g.fillText(v.toPrecision(4), w, 12 + (r / 4) * (h - 24)); }
-  g.textAlign = "left";
-  g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(x(p.t), y(p.p)) : g.moveTo(x(p.t), y(p.p)));
-  g.strokeStyle = "#EEF0F2"; g.lineWidth = 1.5; g.stroke();
-  for (const m of marks.filter((m) => m.t >= from)) { const s = 7; g.fillStyle = m.side === "buy" ? "#BFE9EC" : "#FF8A3D"; g.fillRect(x(m.t) - s / 2, y(m.p) - s / 2, s, s); }
-  const last = pts[pts.length - 1];
-  g.lineWidth = 1; g.strokeStyle = "rgba(255,138,61,0.5)"; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(x(last.t), Math.round(y(last.p)) + 0.5); g.lineTo(pw, Math.round(y(last.p)) + 0.5); g.stroke(); g.setLineDash([]);
-  g.fillStyle = "#FF8A3D"; g.fillRect(x(last.t) - 3, y(last.p) - 3, 6, 6);
-}
-
 function add(cls, html, ts, kind) {
   const feed = $("feed");
   if (feed.firstElementChild?.classList.contains("empty")) feed.innerHTML = "";
@@ -379,17 +360,154 @@ function stats() {
   $("clock").textContent = "T+" + String(Math.floor(s / 60)).padStart(4, "0");
 }
 
-// ---------- the swarm map ----------
-const cv = $("swarm"), ctx = cv.getContext("2d"), card = $("callout"), consoleEl = $("console"), root = document.documentElement;
+// ---------- shared drawing ----------
+const consoleEl = $("console"), mapEl = $("mapbox"), root = document.documentElement;
 const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const C = { fg: "#EEF0F2", muted: "#9B9B9B", dim: "#5B5F66", sun: "#FF8A3D", core: "#FFFFFF", ice: "#BFE9EC", bg: "#000000" };
 const MONO = "'Geist Mono', ui-monospace, monospace";
 const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
-let rot = -0.32, sq = 0.46, W = 0, H = 0, U = 0, cx = 0, cy = 0, dpr = 1, G = 96, padL = 16, lastW = 0, mapT = 0, rings = 3;
+const bayer = (gx, gy) => (BAYER[(gx & 3) + ((gy & 3) << 2)] + 0.5) / 16;
+let dpr = 1, G = 96, padL = 16, padR = 16, rows = 5, lastW = 0, mapT = 0;
 let seed = 11;
 const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
 const stars = Array.from({ length: 200 }, () => [rnd(), rnd(), rnd()]);
+function crosses(g, w, h, ox, oy) {
+  g.lineWidth = 1; g.strokeStyle = C.muted; g.globalAlpha = 0.4; g.beginPath();
+  for (let x = ox; x <= w; x += G) for (let y = oy; y <= h; y += G) { g.moveTo(x - 3, y + 0.5); g.lineTo(x + 4, y + 0.5); g.moveTo(x + 0.5, y - 3); g.lineTo(x + 0.5, y + 4); }
+  g.stroke();
+}
+function starfield(g, w, h) { for (const s of stars) { g.globalAlpha = 0.2 + 0.5 * s[2]; const b = s[2] > 0.85 ? 2 : 1; g.fillStyle = C.muted; g.fillRect(Math.round(s[0] * w), Math.round(s[1] * h), b, b); } g.globalAlpha = 1; }
+function brackets(g, x, y, q, col) {
+  const bx = Math.round(x) + 0.5, by = Math.round(y) + 0.5, c4 = 4;
+  g.strokeStyle = col; g.beginPath();
+  [[-1, -1], [1, -1], [1, 1], [-1, 1]].forEach((m) => { g.moveTo(bx + m[0] * q, by + m[1] * (q - c4)); g.lineTo(bx + m[0] * q, by + m[1] * q); g.lineTo(bx + m[0] * (q - c4), by + m[1] * q); });
+  g.stroke();
+}
+// a small dithered sun: the live price head on the chart, the board on the map
+function ditherSun(g, x0, y0, R, ext, cell, coreOnly, t) {
+  const n = Math.ceil(ext / cell);
+  for (let gy = -n; gy <= n; gy++) for (let gx = -n; gx <= n; gx++) {
+    const x = gx * cell, y = gy * cell, d = Math.sqrt(x * x + y * y);
+    if (d > ext) continue;
+    if (d < R) { if (coreOnly) { g.fillStyle = C.core; g.fillRect(x0 + x, y0 + y, cell, cell); } continue; }
+    if (coreOnly) continue;
+    let v = 1 - (d - R) / (ext - R);
+    v = v * v * (0.82 + 0.18 * Math.sin(t * 0.9 - d * 0.06));
+    if (v > bayer(gx, gy)) { g.fillStyle = C.sun; g.fillRect(x0 + x, y0 + y, cell - 1, cell - 1); }
+  }
+}
 
+// one square grid for the page, the same rule as helioswarm.xyz
+function layout() {
+  const vw = root.clientWidth, pad = vw >= 768 ? 40 : 16, n = Math.max(3, Math.round((vw - pad * 2) / 96));
+  G = Math.floor((vw - pad * 2) / n); padL = Math.floor((vw - n * G) / 2); padR = vw - n * G - padL;
+  root.style.setProperty("--g", G + "px"); root.style.setProperty("--padl", padL + "px"); root.style.setProperty("--padr", padR + "px");
+  root.style.setProperty("--side", (n >= 14 ? 5 : 4) * G + "px");
+  rows = vw >= 768 ? Math.max(5, Math.min(6, Math.round((innerHeight * 0.72 - 96 - 40) / G))) : 6;
+  consoleEl.style.minHeight = (96 + rows * G + 40) + "px";
+  lastW = vw;
+}
+
+// ---------- hero: the last 30 seconds ----------
+const hv = $("hero"), hg = hv.getContext("2d");
+const SPAN = 30_000;
+let HW = 0, HH = 0, vLo = 0, vHi = 0;
+function drawHero() {
+  if (!HW) return;
+  const g = hg;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, HW, HH);
+  crosses(g, HW, HH, padL, 96);
+  starfield(g, HW, HH);
+  const x0 = padL, x1 = HW - padR - G, y0 = 96 + 2 * G, y1 = 96 + rows * G;
+  const now = Date.now(), from = now - SPAN;
+  const X = (t) => x0 + ((t - from) / SPAN) * (x1 - x0);
+  g.font = "10px " + MONO; g.fillStyle = C.dim; g.globalAlpha = 1;
+  // time axis under the plot
+  g.textBaseline = "top";
+  for (let s = 30; s >= 0; s -= 10) { g.textAlign = s === 30 ? "left" : s === 0 ? "right" : "center"; g.fillText(s ? "-" + s + "S" : "NOW", x0 + (1 - s / 30) * (x1 - x0), y1 + 12); }
+  g.strokeStyle = C.dim; g.setLineDash([2, 5]); g.beginPath(); g.moveTo(x0, y1 + 0.5); g.lineTo(x1, y1 + 0.5); g.stroke(); g.setLineDash([]);
+  let pts = prices.filter((p) => p.t >= from);
+  let before = null; for (let i = prices.length - 1; i >= 0; i--) if (prices[i].t < from) { before = prices[i]; break; }
+  if (before) pts.unshift({ t: from, p: before.p });
+  if (!pts.length) { g.textAlign = "left"; g.textBaseline = "middle"; g.fillText("> AWAITING TRADES", x0, (y0 + y1) / 2); return; }
+  pts.push({ t: now, p: pts[pts.length - 1].p });
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { lo = Math.min(lo, p.p); hi = Math.max(hi, p.p); }
+  const pad = (hi - lo) * 0.25 || hi * 0.004;
+  const tLo = lo - pad, tHi = hi + pad;
+  if (!vHi) { vLo = tLo; vHi = tHi; } else { vLo += (tLo - vLo) * 0.08; vHi += (tHi - vHi) * 0.08; }
+  const Y = (p) => y1 - ((p - vLo) / (vHi - vLo)) * (y1 - y0);
+  // price scale on the grid rows
+  g.textAlign = "right"; g.textBaseline = "middle"; g.fillStyle = C.dim;
+  for (let y = y0; y <= y1 + 0.5; y += G) g.fillText((vLo + ((y1 - y) / (y1 - y0)) * (vHi - vLo)).toPrecision(4), HW - padR - 10, y);
+  // the line as a step path (price holds until the next trade)
+  const path = [];
+  for (let i = 0; i < pts.length; i++) {
+    const x = Math.max(x0, X(pts[i].t)), y = Y(pts[i].p);
+    if (i) path.push([x, path[path.length - 1][1]]);
+    path.push([x, y]);
+  }
+  // dithered field under the line, fading toward the floor
+  const cell = HW < 700 ? 3 : 4, depth = Math.min(180, (y1 - y0) * 0.8);
+  g.fillStyle = C.dim; let k = 0;
+  for (let cx = Math.floor(x0 / cell) * cell; cx < x1; cx += cell) {
+    while (k < path.length - 1 && path[k + 1][0] <= cx) k++;
+    const ly = path[k][1];
+    for (let cy = (Math.floor(ly / cell) + 1) * cell; cy < y1; cy += cell) {
+      const v = 1 - (cy - ly) / depth; if (v <= 0) break;
+      if (v * v * 0.85 > bayer(cx / cell, cy / cell)) g.fillRect(cx, cy, cell - 1, cell - 1);
+    }
+  }
+  g.strokeStyle = C.fg; g.lineWidth = 1.5; g.beginPath();
+  path.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+  g.stroke(); g.lineWidth = 1;
+  // market trades: small ticks on the line
+  for (const m of ticks) {
+    if (m.t < from) continue;
+    const s = m.sol >= 1 ? 3 : 2;
+    g.globalAlpha = 0.7; g.fillStyle = m.side === "buy" ? C.ice : C.sun;
+    g.fillRect(Math.round(X(m.t) - s / 2), Math.round(Y(m.p) - s / 2) + (m.side === "buy" ? -6 : 4), s, s);
+  }
+  g.globalAlpha = 1;
+  // unit trades: a marker, brackets, and a call sign on a leader
+  let slot = 0;
+  const shown = marks.filter((m) => m.t >= from), named = HW < 700 ? 3 : 12;
+  shown.forEach((m, mi) => {
+    const label = mi >= shown.length - named;
+    const x = X(m.t), y = Y(m.p), col = m.side === "buy" ? C.ice : C.sun, age = (now - m.t) / 1000;
+    const off = 34 + (label ? slot++ % 3 : 0) * 18, ly = m.side === "buy" ? y - off : y + off;
+    if (label) {
+    g.strokeStyle = col; g.globalAlpha = 0.6; g.beginPath(); g.moveTo(Math.round(x) + 0.5, y); g.lineTo(Math.round(x) + 0.5, ly); g.stroke();
+    g.globalAlpha = 1;
+    const txt = String(m.agent || "").toUpperCase() + (m.side === "buy" ? " [+] " : " [-] ") + fmt(m.sol);
+    const tw = g.measureText(txt).width;
+    const lx = x + tw + 16 > x1 ? Math.round(x) - tw - 12 : Math.round(x) + 4;
+    g.fillStyle = C.bg; g.fillRect(lx, Math.round(ly) - 7, tw + 8, 14);
+    g.fillStyle = col; g.textAlign = "left"; g.textBaseline = "middle"; g.fillText(txt, lx + 4, Math.round(ly) + 0.5);
+    }
+    g.fillStyle = C.bg; g.fillRect(Math.round(x) - 5, Math.round(y) - 5, 10, 10);
+    g.fillStyle = col; g.fillRect(Math.round(x) - 3, Math.round(y) - 3, 7, 7);
+    brackets(g, x, y, 9, col);
+    if (age < 1.6) for (let i = 0; i < 2; i++) {
+      const rr = 12 + ((age * 30 + i * 16) % 32);
+      g.globalAlpha = Math.max(0, 1 - (rr - 12) / 32) * (1 - age / 1.6); g.beginPath(); g.arc(x, y, rr, 0, Math.PI * 2); g.stroke();
+    }
+    g.globalAlpha = 1;
+  });
+  // the live head: a small dithered sun, with the price carried to the scale
+  const hy = Math.round(Y(pts[pts.length - 1].p));
+  g.strokeStyle = C.sun; g.globalAlpha = 0.5; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(x1, hy + 0.5); g.lineTo(HW - padR - 76, hy + 0.5); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+  ditherSun(g, x1, hy, 4, 22, 3, false, mapT); ditherSun(g, x1, hy, 4, 22, 3, true, mapT);
+  const lbl = pts[pts.length - 1].p.toPrecision(4);
+  g.font = "10px " + MONO; const lw = g.measureText(lbl).width;
+  g.fillStyle = C.bg; g.fillRect(HW - padR - lw - 8, hy - 8, lw + 8, 16);
+  g.strokeStyle = C.sun; g.strokeRect(HW - padR - lw - 8 + 0.5, hy - 8 + 0.5, lw + 7, 15);
+  g.fillStyle = C.sun; g.textAlign = "right"; g.textBaseline = "middle"; g.fillText(lbl, HW - padR - 4, hy + 0.5);
+}
+
+// ---------- swarm map ----------
+const cv = $("swarm"), ctx = cv.getContext("2d"), card = $("callout");
+let rot = -0.32, sq = 0.46, W = 0, H = 0, U = 0, cx = 0, cy = 0, rings = 3;
 function orbitSetup() {
   const rank = (c) => { const i = RING_ORDER.indexOf(c); return i < 0 ? 99 : i; };
   const classes = [...new Set([...agents.values()].map((a) => a.preset))].sort((a, b) => rank(a) - rank(b));
@@ -413,48 +531,22 @@ function place(a) {
   const px = rx * Math.cos(a.ang), py = ry * Math.sin(a.ang);
   a.x = cx + px * Math.cos(rot) - py * Math.sin(rot); a.y = cy + px * Math.sin(rot) + py * Math.cos(rot);
 }
-
-// one square grid for the page, the same rule as helioswarm.xyz
-function layout() {
-  const vw = root.clientWidth, pad = vw >= 768 ? 40 : 16, n = Math.max(3, Math.round((vw - pad * 2) / 96));
-  G = Math.floor((vw - pad * 2) / n); padL = Math.floor((vw - n * G) / 2);
-  root.style.setProperty("--g", G + "px"); root.style.setProperty("--padl", padL + "px"); root.style.setProperty("--padr", (vw - n * G - padL) + "px");
-  root.style.setProperty("--side", (n >= 14 ? 5 : 4) * G + "px");
-  const rows = vw >= 768 ? Math.max(5, Math.min(6, Math.round((innerHeight * 0.72 - 96 - 40) / G))) : 6;
-  consoleEl.style.minHeight = (96 + rows * G + 40) + "px";
-  lastW = vw;
-}
-const snapX = (x) => padL + Math.round((x - padL) / G) * G;
-const snapY = (y) => 96 + Math.round((y - 96) / G) * G;
 function resize() {
   if (root.clientWidth !== lastW) layout();
-  const r = consoleEl.getBoundingClientRect(), wide = r.width >= 1024;
-  dpr = Math.min(devicePixelRatio || 1, 2); W = r.width; H = r.height;
-  cx = snapX(W * (wide ? 0.64 : 0.5)); cy = wide ? snapY(H * 0.46) : Math.round(H * 0.5);
-  U = (wide ? Math.min(W * 0.3, H * 0.66) : Math.min(W * 0.62, H * 0.3)) / 0.46;
-  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
-  drawMap(); drawChart();
-}
-function drawSun(coreOnly) {
-  const cell = W < 700 ? 3 : 4, R = U * 0.028, ext = U * 0.12, n = Math.ceil(ext / cell);
-  for (let gy = -n; gy <= n; gy++) for (let gx = -n; gx <= n; gx++) {
-    const x = gx * cell, y = gy * cell, d = Math.sqrt(x * x + y * y);
-    if (d > ext) continue;
-    if (d < R) { if (coreOnly) { ctx.fillStyle = C.core; ctx.fillRect(cx + x, cy + y, cell, cell); } continue; }
-    if (coreOnly) continue;
-    let v = 1 - (d - R) / (ext - R);
-    v = v * v * (0.82 + 0.18 * Math.sin(mapT * 0.9 - d * 0.06));
-    if (v > (BAYER[(gx & 3) + ((gy & 3) << 2)] + 0.5) / 16) { ctx.fillStyle = C.sun; ctx.fillRect(cx + x, cy + y, cell - 1, cell - 1); }
-  }
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  const r = consoleEl.getBoundingClientRect();
+  HW = r.width; HH = r.height; hv.width = Math.round(HW * dpr); hv.height = Math.round(HH * dpr);
+  const m = mapEl.getBoundingClientRect();
+  W = m.width; H = m.height; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cx = Math.round(W / 2); cy = Math.round(H / 2);
+  U = Math.min(W * 0.46, (H * 0.5) / sq) / 0.46;
+  drawHero(); drawMap();
 }
 function drawMap() {
   if (!W) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
-  // registration marks where the page grid crosses (the only grid on the page)
-  ctx.lineWidth = 1; ctx.strokeStyle = C.muted; ctx.globalAlpha = 0.4; ctx.beginPath();
-  for (let x = padL; x <= W; x += G) for (let y = 96; y <= H; y += G) { ctx.moveTo(x - 3, y + 0.5); ctx.lineTo(x + 4, y + 0.5); ctx.moveTo(x + 0.5, y - 3); ctx.lineTo(x + 0.5, y + 4); }
-  ctx.stroke();
-  for (const s of stars) { ctx.globalAlpha = 0.2 + 0.5 * s[2]; const b = s[2] > 0.85 ? 2 : 1; ctx.fillStyle = C.muted; ctx.fillRect(Math.round(s[0] * W), Math.round(s[1] * H), b, b); }
+  crosses(ctx, W, H, 0, 0);
+  starfield(ctx, W, H);
   const list = [...agents.values()];
   for (const a of list) place(a);
   ctx.strokeStyle = C.muted; ctx.globalAlpha = 0.13; ctx.beginPath();
@@ -462,7 +554,8 @@ function drawMap() {
   ctx.stroke();
   for (let i = 0; i < rings; i++) { const rx = ringRx(i); ctx.strokeStyle = C.dim; ctx.globalAlpha = 0.7; ctx.setLineDash(i % 2 ? [2, 5] : []); ctx.beginPath(); ctx.ellipse(cx, cy, rx, rx * sq, rot, 0, Math.PI * 2); ctx.stroke(); }
   ctx.setLineDash([]); ctx.globalAlpha = 1;
-  drawSun(false);
+  const cell = W < 700 ? 3 : 4;
+  ditherSun(ctx, cx, cy, U * 0.028, U * 0.12, cell, false, mapT);
   for (const p of pulses) { const age = mapT - p, pr = U * 0.55 * age / 2.4; ctx.strokeStyle = C.sun; ctx.globalAlpha = Math.max(0, 1 - age / 2.4); ctx.beginPath(); ctx.ellipse(cx, cy, pr, pr * sq, rot, 0, Math.PI * 2); ctx.stroke(); }
   ctx.globalAlpha = 1;
   const size = W < 700 ? 5 : 6, names = list.length <= 16;
@@ -482,14 +575,9 @@ function drawMap() {
     if (alpha > 0 && a.id !== hoverId) { ctx.globalAlpha = alpha; ctx.fillStyle = a.flash ? col : C.muted; ctx.fillText(String(a.id).toUpperCase(), a.x + size + 5, a.y + 0.5); }
   }
   ctx.globalAlpha = 1;
-  drawSun(true);
+  ditherSun(ctx, cx, cy, U * 0.028, U * 0.12, cell, true, mapT);
   const fa = hoverId ? agents.get(hoverId) : null;
-  if (fa) {
-    const q = size + 6, bx = Math.round(fa.x) + 0.5, by = Math.round(fa.y) + 0.5, c4 = 4;
-    ctx.strokeStyle = C.fg; ctx.beginPath();
-    [[-1, -1], [1, -1], [1, 1], [-1, 1]].forEach((m) => { ctx.moveTo(bx + m[0] * q, by + m[1] * (q - c4)); ctx.lineTo(bx + m[0] * q, by + m[1] * q); ctx.lineTo(bx + m[0] * (q - c4), by + m[1] * q); });
-    ctx.stroke();
-  }
+  if (fa) brackets(ctx, fa.x, fa.y, size + 6, C.fg);
   placeCard(fa);
 }
 function setCard(a) {
@@ -509,9 +597,9 @@ function placeCard(a) {
   if (!a) return;
   const cw = card.offsetWidth, ch = card.offsetHeight;
   let x = a.x + 22, y = a.y - ch - 14;
-  if (x + cw > W - 12) x = a.x - cw - 22;
-  if (y < 76) y = a.y + 22;
-  x = Math.max(12, Math.min(W - cw - 12, x)); y = Math.max(76, Math.min(H - ch - 12, y));
+  if (x + cw > W - 8) x = a.x - cw - 22;
+  if (y < 8) y = a.y + 22;
+  x = Math.max(8, Math.min(W - cw - 8, x)); y = Math.max(8, Math.min(H - ch - 8, y));
   card.style.transform = "translate(" + Math.round(x) + "px," + Math.round(y) + "px)";
 }
 function setStatus(text, alert) { const el = $("mStatus"); el.textContent = text; el.className = alert ? "alert" : ""; }
@@ -522,22 +610,24 @@ function pick() {
 }
 function setHover(id) { if (id === hoverId) return; hoverId = id; for (const r of $("agents").children) r.classList.toggle("hl", !!id && r.dataset.id === id); }
 function at(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
-consoleEl.addEventListener("pointermove", (e) => { pointer = at(e); pick(); if (!running) drawMap(); });
-consoleEl.addEventListener("pointerleave", () => { pointer = null; setHover(null); if (!running) drawMap(); });
+mapEl.addEventListener("pointermove", (e) => { pointer = at(e); pick(); if (!running) drawMap(); });
+mapEl.addEventListener("pointerleave", () => { pointer = null; setHover(null); if (!running) drawMap(); });
 $("agents").addEventListener("pointerover", (e) => { const r = e.target.closest(".urow[data-id]"); setHover(r ? r.dataset.id : null); if (!running) drawMap(); });
 $("agents").addEventListener("pointerleave", () => { setHover(null); if (!running) drawMap(); });
 
-let last = 0, running = false, visible = true;
+let last = 0, running = false, heroVis = true, mapVis = true;
 function frame(now) {
   if (!running) return;
   const dt = Math.min(0.05, (now - last) / 1000 || 0); last = now; mapT += dt;
   for (const a of agents.values()) a.ang += a.w * dt;
   while (pulses.length && mapT - pulses[0] > 2.4) pulses.shift();
   if (status && mapT > status) { status = null; setStatus("NOMINAL", false); }
-  drawMap();
+  if (heroVis) drawHero();
+  if (mapVis) drawMap();
   requestAnimationFrame(frame);
 }
-function setRunning(on) { on = on && !reduce; if (on && !running) { running = true; last = performance.now(); requestAnimationFrame(frame); } else if (!on) running = false; }
+function setRunning(on) { on = on && !reduce && !document.hidden; if (on && !running) { running = true; last = performance.now(); requestAnimationFrame(frame); } else if (!on) running = false; }
+function trim() { const cut = Date.now() - 120_000; for (const a of [prices, marks, ticks]) while (a.length && a[0].t < cut) a.shift(); }
 
 function onEvent(l) {
   const ts = l.ts;
@@ -556,7 +646,7 @@ function onEvent(l) {
         a.flash = buy ? "buy" : "sell"; a.flashT = mapT;
         clearTimeout(a.flashTimer); a.flashTimer = setTimeout(() => { a.flash = null; renderAgents(); if (!running) drawMap(); }, 2400);
       }
-      if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; marks.push({ t: Date.now(), p: lastPrice, side: l.side }); prices.push({ t: Date.now(), p: lastPrice }); }
+      if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; marks.push({ t: Date.now(), p: lastPrice, side: l.side, agent: l.agent, sol: Number(l.sol) }); prices.push({ t: Date.now(), p: lastPrice }); }
       const link = l.sig && l.sig !== "paper" ? ' <a href="https://solscan.io/tx/' + l.sig + '" target="_blank" rel="noopener">tx ↗</a>' : ' <span class="dim">paper</span>';
       add("swarm", '<span class="who">' + esc(l.agent) + '</span> <span class="k ' + (buy ? "buy" : "sell") + '">' + (buy ? "buy" : "sell") + "</span> " + fmt(l.sol) + " SOL <span class='dim'>" + big(Number(l.tokens)) + " " + esc(sym(l.mint)) + (l.reason && l.reason !== "on-chain" ? " · " + esc(l.reason) : "") + "</span>" + link, ts, "swarm");
       renderAgents(); stats(); return;
@@ -570,7 +660,7 @@ function onEvent(l) {
     case "flow": {
       if (l.kind !== "buy" && l.kind !== "sell") return;
       const buy = l.kind === "buy";
-      if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; prices.push({ t: Date.now(), p: lastPrice }); if (prices.length > 4000) prices.shift(); }
+      if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; prices.push({ t: Date.now(), p: lastPrice }); ticks.push({ t: Date.now(), p: lastPrice, side: l.kind, sol: Number(l.sol) }); }
       mkt.push({ t: Date.now(), s: l.kind });
       if (l.seenEarlyMs != null && l.seenEarlyMs >= 0) early.push(l.seenEarlyMs);
       const e = l.seenEarlyMs != null && l.seenEarlyMs >= 0 ? ' <span class="early">⚡' + l.seenEarlyMs + "ms</span>" : "";
@@ -610,12 +700,15 @@ document.querySelectorAll(".tabs .btn").forEach((b) => b.onclick = () => {
   filter = b.dataset.f;
   for (const ev of $("feed").children) ev.style.display = filter === "all" || ev.dataset.kind === filter ? "" : "none";
 });
-setInterval(() => { drawChart(); stats(); }, 1000);
-if ("ResizeObserver" in window) new ResizeObserver(resize).observe(consoleEl); else addEventListener("resize", resize);
+setInterval(() => { stats(); trim(); if (!running) drawHero(); }, 1000);
+if ("ResizeObserver" in window) { const ro = new ResizeObserver(resize); ro.observe(consoleEl); ro.observe(mapEl); } else addEventListener("resize", resize);
 layout(); resize();
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { drawMap(); drawChart(); });
-if ("IntersectionObserver" in window) new IntersectionObserver((es) => { visible = es[0].isIntersecting; setRunning(visible && !document.hidden); }).observe(cv);
-document.addEventListener("visibilitychange", () => setRunning(visible && !document.hidden));
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { drawHero(); drawMap(); });
+if ("IntersectionObserver" in window) {
+  new IntersectionObserver((es) => { heroVis = es[0].isIntersecting; }).observe(consoleEl);
+  new IntersectionObserver((es) => { mapVis = es[0].isIntersecting; }).observe(mapEl);
+}
+document.addEventListener("visibilitychange", () => setRunning(true));
 setRunning(true);
 connect();
 </script>
