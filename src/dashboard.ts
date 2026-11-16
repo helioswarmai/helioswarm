@@ -514,6 +514,27 @@ const tOf = (l) => Date.parse(l.ts) || Date.now();
 function lb(arr, t) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].t < t) lo = m + 1; else hi = m; } return lo; }
 function ins(arr, item) { let i = arr.length; while (i > 0 && arr[i - 1].t > item.t) i--; arr.splice(i, 0, item); }
 function addPrice(t, p) { ins(prices, { t, p }); lastPrice = prices[prices.length - 1].p; }
+// Some routed swaps (multi-hop, dust legs) read as absurd prices. A trade only moves the chart
+// when its price is within 2.5x of the median of recent accepted trades; a run of rejects that
+// agree with each other is taken as a real move and becomes the new reference.
+function makeGate() {
+  let win = [], rej = [];
+  const med = (a) => [...a].sort((x, y) => x - y)[a.length >> 1];
+  return (p, sol) => {
+    if (!(p > 0) || !(sol >= 0.002)) return false;
+    if (win.length >= 5) {
+      const m = med(win);
+      if (p > m * 2.5 || p < m / 2.5) {
+        rej.push(p); if (rej.length > 8) rej.shift();
+        const r = med(rej);
+        if (rej.length < 8 || rej.some((x) => x > r * 1.5 || x < r / 1.5)) return false;
+        win = rej.slice(); rej = []; return true;
+      }
+    }
+    rej = []; win.push(p); if (win.length > 15) win.shift(); return true;
+  };
+}
+let gate = makeGate();
 let pointer = null, hoverId = null, pulses = [], status = null, cardKey = "";
 const t0 = Date.now();
 let solUsd = null;
@@ -895,7 +916,7 @@ function onEvent(l) {
         a.flash = buy ? "buy" : "sell"; a.flashT = mapT;
         clearTimeout(a.flashTimer); a.flashTimer = setTimeout(() => { a.flash = null; renderAgents(); if (!running) drawMap(); }, 2400);
       }
-      if (l.priceSol) { const p = Number(l.priceSol); ins(marks, { t, p, side: l.side, agent: l.agent, sol: Number(l.sol) }); addPrice(t, p); }
+      if (l.priceSol) { const p = Number(l.priceSol), ok = gate(p, Number(l.sol)); if (ok) addPrice(t, p); if (lastPrice) ins(marks, { t, p: ok ? p : lastPrice, side: l.side, agent: l.agent, sol: Number(l.sol) }); }
       const link = l.sig && l.sig !== "paper" ? ' <a href="https://solscan.io/tx/' + l.sig + '" target="_blank" rel="noopener">tx ↗</a>' : ' <span class="dim">paper</span>';
       add("swarm", '<span class="who">' + esc(l.agent) + '</span> <span class="k ' + (buy ? "buy" : "sell") + '">' + (buy ? "buy" : "sell") + "</span> " + fmt(l.sol) + " SOL <span class='dim'>" + big(Number(l.tokens)) + " " + esc(sym(l.mint)) + (l.reason && l.reason !== "on-chain" ? " · " + esc(l.reason) : "") + "</span>" + link, ts, "swarm");
       if (!syncing) { renderAgents(); stats(); }
@@ -910,7 +931,7 @@ function onEvent(l) {
     case "flow": {
       if (l.kind !== "buy" && l.kind !== "sell") return;
       const buy = l.kind === "buy", t = tOf(l);
-      if (l.priceSol) { const p = Number(l.priceSol); addPrice(t, p); ins(ticks, { t, p, side: l.kind, sol: Number(l.sol) }); }
+      if (l.priceSol && gate(Number(l.priceSol), Number(l.sol))) { const p = Number(l.priceSol); addPrice(t, p); ins(ticks, { t, p, side: l.kind, sol: Number(l.sol) }); }
       ins(mkt, { t, s: l.kind, sol: Number(l.sol) || 0 });
       if (l.seenEarlyMs != null && l.seenEarlyMs >= 0) early.push(l.seenEarlyMs);
       const e = l.seenEarlyMs != null && l.seenEarlyMs >= 0 ? ' <span class="early">⚡' + l.seenEarlyMs + "ms</span>" : "";
@@ -941,9 +962,15 @@ async function loadTrades() {
     const d = await res.json(), cut = Number(d.before) || since;
     const keep = (a) => a.slice(lb(a, cut));
     const P = [], T = [], M = [];
-    for (const f of d.flows) { P.push({ t: f[0], p: f[3] }); T.push({ t: f[0], p: f[3], side: f[1] ? "buy" : "sell", sol: f[2] }); }
-    for (const f of d.fills) { P.push({ t: f[0], p: f[4] }); M.push({ t: f[0], p: f[4], side: f[2] ? "buy" : "sell", agent: f[1], sol: f[3] }); }
-    P.sort((a, b) => a.t - b.t);
+    // Flows and fills in time order through a fresh gate, so outliers in old history are dropped too.
+    const all = d.flows.map((f) => [f[0], 0, f]).concat(d.fills.map((f) => [f[0], 1, f])).sort((a, b) => a[0] - b[0]);
+    const g = makeGate(); let last = 0;
+    for (const [t, fill, f] of all) {
+      const p = fill ? f[4] : f[3], sol = fill ? f[3] : f[2], ok = g(p, sol);
+      if (ok) { P.push({ t, p }); last = p; }
+      if (fill) { if (last) M.push({ t, p: ok ? p : last, side: f[2] ? "buy" : "sell", agent: f[1], sol }); }
+      else if (ok) T.push({ t, p, side: f[1] ? "buy" : "sell", sol });
+    }
     const np = P.concat(keep(prices)), nt = T.concat(keep(ticks)), nm = M.concat(keep(marks));
     prices.length = 0; ticks.length = 0; marks.length = 0;
     for (const x of np) prices.push(x); for (const x of nt) ticks.push(x); for (const x of nm) marks.push(x);
@@ -962,7 +989,7 @@ function connect() {
     agents.clear();
     // A reconnect replays the whole history, so start the chart and counters clean.
     for (const a of [prices, marks, ticks, mkt, early]) a.length = 0;
-    agentTrades = 0; lastPrice = 0; syncing = true; vHi = 0; oldFills = 0; since = 0;
+    agentTrades = 0; lastPrice = 0; syncing = true; vHi = 0; oldFills = 0; since = 0; gate = makeGate();
     for (const a of info.agents) agents.set(a.id, { ...a, cash: a.bankrollSol, start: a.bankrollSol, tokens: 0, last: "" });
     orbitSetup();
     const t = info.tokens[0];
