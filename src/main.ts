@@ -246,14 +246,23 @@ async function main() {
           return lines;
         };
         const { backfillAll, pollFlows } = await import("./backfill");
+        // New trades from the RPC from the start, so the page stays current while the backfill runs
+        // and when the gRPC stream drops. The first round predates the wallet read, so it's history.
+        let firstPoll = true;
+        stopPoll = pollFlows(rpcUrl, mints, {
+          has: (s) => dash.hasSig(s),
+          onLines: (flows) => {
+            if (firstPoll) dash.seed(asLines(flows));
+            else for (const l of asLines(flows)) dash.push(l);
+            firstPoll = false;
+          },
+          onError: (e) => view.status(`dashboard: trade poll failed: ${e.message}`),
+        }, 3000);
+        // The rest of the history behind it, gently: it shares the RPC with the trading units.
         const known = dash.knownSigs(); // from the history file; trades arriving live meanwhile must not stop the backfill
-        void backfillAll(rpcUrl, mints, { has: (s) => known.has(s), oldest: () => dash.oldestSig(), onBatch: (flows) => dash.seed(asLines(flows)) })
+        void backfillAll(rpcUrl, mints, { has: (s) => known.has(s), oldest: () => dash.oldestSig(), onBatch: (flows) => dash.seed(asLines(flows)) }, { concurrency: 4, maxTx: 60_000 })
           .then((n) => { dash.flush(); view.status(`dashboard: ${n} past trades loaded from chain`); })
-          .catch((e) => view.status(`dashboard: trade backfill failed: ${(e as Error).message}`))
-          .finally(() => {
-            // New trades from the RPC too, in case the gRPC stream drops.
-            stopPoll = pollFlows(rpcUrl, mints, { has: (s) => dash.hasSig(s), onLines: (flows) => { for (const l of asLines(flows)) dash.push(l); } });
-          });
+          .catch((e) => view.status(`dashboard: trade backfill failed: ${(e as Error).message}`));
       }
       const stopStream = await startStream(cfg, mints, rpcUrl, (s) => (view.signal(s), dash?.push({ event: "signal", ...s })), {
         onFlow: (l) => {

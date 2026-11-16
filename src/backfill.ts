@@ -146,7 +146,7 @@ export function pollFlows(rpcUrl: string, mints: string[], hooks: { has: (sig: s
     try {
       for (const mint of mints) {
         const r = await signatures(rpcUrl, mint, { limit: 1000, stop: (s) => hooks.has(s) || done.has(s) });
-        const sigs = r.sigs.slice(0, 300);
+        const sigs = r.sigs.slice(0, 200);
         if (sigs.length) hooks.onLines(await flowsOf(rpcUrl, sigs, targets, 6));
         for (const s of sigs) done.add(s);
         if (done.size > 20_000) for (const s of [...done].slice(0, 10_000)) done.delete(s);
@@ -156,7 +156,7 @@ export function pollFlows(rpcUrl: string, mints: string[], hooks: { has: (sig: s
     }
     if (!stopped) { timer = setTimeout(tick, everyMs); timer.unref(); }
   };
-  timer = setTimeout(tick, everyMs);
+  timer = setTimeout(tick, 500);
   timer.unref();
   return () => { stopped = true; clearTimeout(timer); };
 }
