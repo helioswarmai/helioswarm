@@ -1,7 +1,8 @@
 // Live demo dashboard: `--dashboard [port]` on a trading run or a watch serves a page at
 // http://localhost:<port> that shows the agents, their wallets and trades, the market feed,
 // early (pre-execution) warnings and signals as they happen. Server-sent events, no deps.
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { createServer, type ServerResponse } from "node:http";
 
 export interface DashboardAgent {
@@ -19,42 +20,63 @@ export interface DashboardInfo {
   agents: DashboardAgent[];
 }
 
-/** How far back the page can look: history kept on the server and replayed to every new visitor. */
-const KEEP_MS = 60 * 60_000;
-const KEEP_MAX = 12_000;
+/** Every event from the last hour is replayed to a new visitor; older trades come from /trades. */
+const RECENT_MS = 60 * 60_000;
+/** Trades (market flow and unit fills) are kept for the token's whole life, up to this many. */
+const KEEP_TRADES = 250_000;
 
 type Line = Record<string, unknown>;
+type Entry = { t: number; key?: string; line: Line; msg: string };
 const ser = (line: Line) => JSON.stringify(line, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
 /** One entry per transaction and wallet, so a trade seen live and again in a backfill shows once. */
 const keyOf = (line: Line) => (line.sig ? `${line.event}|${line.sig}|${line.owner ?? line.agent ?? ""}` : undefined);
 const tsOf = (line: Line) => Date.parse(String(line.ts ?? "")) || Date.now();
+const isTrade = (line: Line) => line.event === "flow" || line.event === "fill";
+const entry = (line: Line): Entry => ({ t: tsOf(line), key: keyOf(line), line, msg: `data: ${ser(line)}\n\n` });
+/** First index whose time is at or after t. */
+const lower = (a: Entry[], t: number) => { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m]!.t < t) lo = m + 1; else hi = m; } return lo; };
 
 export class Dashboard {
   private clients = new Set<ServerResponse>();
-  /** Time-ordered market and swarm events from the last hour. */
-  private history: { t: number; sig?: string; msg: string }[] = [];
+  /** Every trade, oldest first. */
+  private trades: Entry[] = [];
+  /** Everything else (signals, pending, errors) from the last hour. */
+  private recent: Entry[] = [];
   private seen = new Set<string>();
+  /** Transaction signatures already held, so a backfill knows where to stop. */
+  private sigs = new Set<string>();
   /** Latest wallet line per agent, replayed before the history so balances are right. */
   private wallets = new Map<string, string>();
   private server;
   private solUsd: number | null = null;
   private file: string | null;
+  private tradesBody: { n: number; at: number; body: Buffer } | null = null;
+  private dirty = false;
 
   constructor(private info: DashboardInfo, port: number, opts: { historyFile?: string | null } = {}) {
     this.file = opts.historyFile === undefined ? process.env.DASHBOARD_HISTORY_FILE || null : opts.historyFile;
     this.load();
     this.server = createServer((req, res) => {
-      const path = (req.url ?? "/").split("?")[0]!;
+      const url = new URL(req.url ?? "/", "http://x");
+      const path = url.pathname;
       if (path.endsWith("/events")) {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
         res.write(`event: info\ndata: ${JSON.stringify(this.info)}\n\n`);
         if (this.solUsd) res.write(`data: ${JSON.stringify({ event: "solusd", usd: this.solUsd })}\n\n`);
         for (const w of this.wallets.values()) res.write(w);
-        this.prune();
-        res.write(this.history.map((h) => h.msg).join(""));
-        res.write(`data: ${JSON.stringify({ event: "synced" })}\n\n`);
+        const since = Date.now() - RECENT_MS;
+        res.write(this.replay(since));
+        res.write(`data: ${JSON.stringify({ event: "synced", since, total: this.trades.length })}\n\n`);
         this.clients.add(res);
         req.on("close", () => this.clients.delete(res));
+        return;
+      }
+      if (path.endsWith("/trades")) {
+        const before = Number(url.searchParams.get("before")) || Date.now();
+        const body = this.tradesJson(before);
+        const gz = /\bgzip\b/.test(String(req.headers["accept-encoding"] ?? ""));
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-cache", ...(gz ? { "content-encoding": "gzip" } : {}) });
+        res.end(gz ? gzipSync(body) : body);
         return;
       }
       if (path === "/" || path.endsWith("/") || path.endsWith("/live")) {
@@ -69,8 +91,8 @@ export class Dashboard {
       for (const c of this.clients) c.write(": ping\n\n");
     }, 15_000);
     ping.unref();
-    // Rewrite the history file now and then so it only holds the last hour.
-    const compact = setInterval(() => this.save(), 5 * 60_000);
+    // Rewrite the history file now and then (appends happen as trades arrive).
+    const compact = setInterval(() => this.dirty && this.save(), 10 * 60_000);
     compact.unref();
     // SOL/USD for market cap in dollars, from Jupiter's public price API once a minute.
     const solPrice = async () => {
@@ -92,71 +114,131 @@ export class Dashboard {
     usdTimer.unref();
   }
 
+  /** The transactions held right now (for a backfill that should ignore trades arriving live meanwhile). */
+  knownSigs() {
+    return new Set(this.sigs);
+  }
+
+  /** True once this transaction's trades are held. */
+  hasSig(sig: string) {
+    return this.sigs.has(sig);
+  }
+
+  /** The oldest trade held, for resuming a backfill that stopped early. */
+  oldestSig(): string | undefined {
+    for (const e of this.trades) if (e.line.sig) return String(e.line.sig);
+    return undefined;
+  }
+
   push(line: Line) {
     if (line.ts == null) line = { ts: new Date().toISOString(), ...line };
-    const msg = `data: ${ser(line)}\n\n`;
     if (line.event === "wallet") {
+      const msg = `data: ${ser(line)}\n\n`;
       this.wallets.set(String(line.agent), msg);
-    } else {
-      const key = keyOf(line);
-      if (key && this.seen.has(key)) return;
-      if (key) this.seen.add(key);
-      this.history.push({ t: tsOf(line), sig: key, msg });
-      if (this.history.length > KEEP_MAX + 500) this.prune();
-      if (this.file) appendFileSync(this.file, ser(line) + "\n");
+      for (const c of this.clients) c.write(msg);
+      return;
     }
-    for (const c of this.clients) c.write(msg);
+    const e = entry(line);
+    if (e.key && this.seen.has(e.key)) return;
+    this.add(e);
+    if (isTrade(line) && this.file) {
+      try { appendFileSync(this.file, ser(line) + "\n"); } catch { /* the next compaction rewrites it */ }
+    }
+    for (const c of this.clients) c.write(e.msg);
   }
 
   /**
-   * Adds older events (a chain backfill) in time order. They are marked hist so the page
-   * shows them on the chart and in the feed without touching the units' current balances.
+   * Adds older trades (a chain backfill). They are marked hist so the page shows them on the
+   * chart and in the feed without touching the units' current balances. The last hour goes out
+   * to open pages as events; for anything older they get a nudge to fetch /trades again.
    */
   seed(lines: Line[]) {
-    const fresh: { t: number; sig?: string; msg: string }[] = [];
+    const since = Date.now() - RECENT_MS;
+    const fresh: Entry[] = [];
     for (const raw of lines) {
-      const line: Line = { ...raw, hist: true };
-      const key = keyOf(line);
-      if (key && this.seen.has(key)) continue;
-      if (key) this.seen.add(key);
-      fresh.push({ t: tsOf(line), sig: key, msg: `data: ${ser(line)}\n\n` });
+      const e = entry({ ...raw, hist: true });
+      if (e.key && this.seen.has(e.key)) continue;
+      fresh.push(e);
     }
     if (!fresh.length) return 0;
-    this.history = [...this.history, ...fresh].sort((a, b) => a.t - b.t);
-    this.prune();
-    this.save();
-    const batch = fresh.map((h) => h.msg).join("");
-    for (const c of this.clients) c.write(batch);
+    fresh.sort((a, b) => a.t - b.t);
+    for (const e of fresh) this.add(e, true);
+    this.trades.sort((a, b) => a.t - b.t);
+    this.dirty = true;
+    const live = fresh.filter((e) => e.t >= since).map((e) => e.msg).join("");
+    const older = fresh.some((e) => e.t < since);
+    const msg = live + (older ? `data: ${JSON.stringify({ event: "backfill", total: this.trades.length })}\n\n` : "");
+    for (const c of this.clients) c.write(msg);
     return fresh.length;
   }
 
-  private prune() {
-    const cut = Date.now() - KEEP_MS;
-    let i = 0;
-    while (i < this.history.length && this.history[i]!.t < cut) i++;
-    i = Math.max(i, this.history.length - KEEP_MAX);
-    if (i > 0) for (const h of this.history.splice(0, i)) if (h.sig) this.seen.delete(h.sig);
+  /** Writes the history file now (after a backfill finishes). */
+  flush() {
+    if (this.dirty) this.save();
+  }
+
+  private add(e: Entry, unsorted = false) {
+    if (e.key) this.seen.add(e.key);
+    if (isTrade(e.line)) {
+      if (e.line.sig) this.sigs.add(String(e.line.sig));
+      if (unsorted || !this.trades.length || this.trades[this.trades.length - 1]!.t <= e.t) this.trades.push(e);
+      else this.trades.splice(lower(this.trades, e.t + 1), 0, e);
+      if (this.trades.length > KEEP_TRADES) for (const old of this.trades.splice(0, this.trades.length - KEEP_TRADES)) if (old.key) this.seen.delete(old.key);
+    } else {
+      this.recent.push(e);
+      const cut = Date.now() - RECENT_MS;
+      if (this.recent.length > 2000 || (this.recent[0] && this.recent[0].t < cut)) {
+        const i = this.recent.findIndex((r) => r.t >= cut);
+        for (const old of this.recent.splice(0, i < 0 ? this.recent.length : i)) if (old.key) this.seen.delete(old.key);
+      }
+    }
+  }
+
+  /** Trades and other events from `since` on, merged in time order. */
+  private replay(since: number) {
+    const a = this.trades.slice(lower(this.trades, since));
+    const b = this.recent.filter((e) => e.t >= since);
+    const out: string[] = [];
+    let i = 0, j = 0;
+    while (i < a.length || j < b.length) out.push(j >= b.length || (i < a.length && a[i]!.t <= b[j]!.t) ? a[i++]!.msg : b[j++]!.msg);
+    return out.join("");
+  }
+
+  /**
+   * Trades before `before` in a compact form for the chart:
+   * flows [t, 1 buy | 0 sell, sol, priceSol], fills [t, agent, 1 | 0, sol, priceSol].
+   */
+  private tradesJson(before: number) {
+    const now = Date.now();
+    if (this.tradesBody && this.tradesBody.n === this.trades.length && Math.abs(this.tradesBody.at - before) < 30_000 && now - this.tradesBody.at < 30_000) return this.tradesBody.body;
+    const flows: unknown[] = [], fills: unknown[] = [];
+    const r = (n: unknown, d: number) => +Number(n).toPrecision(d);
+    for (const e of this.trades) {
+      if (e.t >= before) break;
+      const l = e.line;
+      if (l.event === "flow" && (l.kind === "buy" || l.kind === "sell") && l.priceSol) flows.push([e.t, l.kind === "buy" ? 1 : 0, r(l.sol, 5), r(l.priceSol, 6)]);
+      else if (l.event === "fill" && l.priceSol) fills.push([e.t, l.agent, l.side === "buy" ? 1 : 0, r(l.sol, 5), r(l.priceSol, 6)]);
+    }
+    const body = Buffer.from(JSON.stringify({ before, flows, fills }));
+    this.tradesBody = { n: this.trades.length, at: before, body };
+    return body;
   }
 
   private load() {
     if (!this.file || !existsSync(this.file)) return;
     try {
-      const cut = Date.now() - KEEP_MS;
       for (const row of readFileSync(this.file, "utf8").split("\n")) {
         if (!row) continue;
-        const line = JSON.parse(row) as Line;
-        const t = tsOf(line);
-        if (t < cut) continue;
+        let line: Line;
+        try { line = JSON.parse(row) as Line; } catch { continue; }
+        if (!isTrade(line)) continue;
         // Balances come from a fresh wallet read on this start, so earlier fills are history only.
-        const msg = `data: ${ser({ ...line, hist: true })}\n\n`;
-        const key = keyOf(line);
-        if (key && this.seen.has(key)) continue;
-        if (key) this.seen.add(key);
-        this.history.push({ t, sig: key, msg });
+        const e = entry({ ...line, hist: true });
+        if (e.key && this.seen.has(e.key)) continue;
+        this.add(e, true);
       }
-      this.history.sort((a, b) => a.t - b.t);
-      this.prune();
-      console.log(`  Dashboard: ${this.history.length} events loaded from ${this.file}`);
+      this.trades.sort((a, b) => a.t - b.t);
+      console.log(`  Dashboard: ${this.trades.length} trades loaded from ${this.file}`);
     } catch (e) {
       console.warn(`  Dashboard: could not read ${this.file}: ${(e as Error).message}`);
     }
@@ -165,9 +247,10 @@ export class Dashboard {
   private save() {
     if (!this.file) return;
     try {
-      this.prune();
-      const rows = this.history.map((h) => h.msg.slice(6, -2) + "\n").join("");
-      writeFileSync(this.file, rows);
+      const tmp = this.file + ".tmp";
+      writeFileSync(tmp, this.trades.map((e) => ser(e.line) + "\n").join(""));
+      renameSync(tmp, this.file);
+      this.dirty = false;
     } catch (e) {
       console.warn(`  Dashboard: could not write ${this.file}: ${(e as Error).message}`);
     }
@@ -267,6 +350,7 @@ a { color: inherit; }
 .rng button { font: inherit; letter-spacing: 0.08em; color: var(--dim); background: rgba(0,0,0,0.6); border: 1px solid transparent; padding: 2px 6px; cursor: pointer; transition: color 700ms var(--ease), border-color 700ms var(--ease); }
 .rng button:hover { color: var(--fg); }
 .rng button.on { color: var(--sun); border-color: var(--sun); }
+@media (max-width: 767px) { .rng { position: absolute; left: max(var(--padl), env(safe-area-inset-left, 0px)); top: 212px; margin-left: -6px; } }
 @media (max-width: 767px) { .clock .pair, .clock .btn { display: none; } }
 
 /* units: a table on wide screens, stacked rows on narrow ones */
@@ -361,7 +445,7 @@ STATUS ...... <b id="mStatus">NOMINAL</b></pre>
       <strong id="clock">T+0000</strong>
       <span class="legend" aria-hidden="true">[ ] HOLD   <span class="ice">[+] BUY</span>   <span class="sun">[-] SELL</span></span>
       <span class="label pair"><b id="sym">-</b> MCAP &nbsp;<span id="chg"></span> <span class="dim">:: <span id="rngLbl">30S</span></span></span>
-      <span class="rng" role="group" aria-label="Chart range"><button type="button" data-r="30S">30S</button><button type="button" data-r="5M">5M</button><button type="button" data-r="1H">1H</button></span>
+      <span class="rng" role="group" aria-label="Chart range"><button type="button" data-r="30S">30S</button><button type="button" data-r="5M">5M</button><button type="button" data-r="1H">1H</button><button type="button" data-r="24H">24H</button><button type="button" data-r="ALL">ALL</button></span>
       <a class="btn" id="mintLink" target="_blank" rel="noopener">Token</a>
     </div>
   </div>
@@ -426,6 +510,8 @@ const prices = [], marks = [], ticks = [], mkt = [], early = [];
 let agentTrades = 0, lastPrice = 0, syncing = true;
 // Events carry their own time, so history replayed on connect lands where it happened.
 const tOf = (l) => Date.parse(l.ts) || Date.now();
+// First index whose time is at or after t (arrays are kept in time order).
+function lb(arr, t) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].t < t) lo = m + 1; else hi = m; } return lo; }
 function ins(arr, item) { let i = arr.length; while (i > 0 && arr[i - 1].t > item.t) i--; arr.splice(i, 0, item); }
 function addPrice(t, p) { ins(prices, { t, p }); lastPrice = prices[prices.length - 1].p; }
 let pointer = null, hoverId = null, pulses = [], status = null, cardKey = "";
@@ -493,8 +579,7 @@ function stats() {
   $("sTrades").textContent = String(agentTrades).padStart(2, "0");
   if (lastPrice) {
     $("mcap").textContent = money(mcapOf(lastPrice));
-    const from = Date.now() - SPAN; let ref = 0;
-    for (let i = prices.length - 1; i >= 0; i--) { ref = prices[i].p; if (prices[i].t < from) break; }
+    const i = lb(prices, Date.now() - SPAN), ref = prices[Math.max(0, i - 1)]?.p || 0;
     if (ref) { const c = (lastPrice / ref - 1) * 100; $("chg").innerHTML = '<span class="' + (c >= 0 ? "ice" : "sun") + '">' + (c >= 0 ? "+" : "") + c.toFixed(2) + "%</span>"; }
   }
   const s = Math.floor((Date.now() - t0) / 1000);
@@ -552,15 +637,27 @@ function layout() {
 // ---------- hero: market cap candles and volume, last 30 seconds ----------
 const hv = $("hero"), hg = hv.getContext("2d");
 // Chart ranges: span, candle size, and where the time labels go (seconds before now).
+// ALL spans from the first trade to now, with a candle size picked to give about 90 candles.
 const RANGES = {
   "30S": { span: 30_000, bucket: 1000, ticks: [30, 20, 10, 0], unit: "1S" },
   "5M": { span: 300_000, bucket: 10_000, ticks: [300, 240, 180, 120, 60, 0], unit: "10S" },
   "1H": { span: 3_600_000, bucket: 60_000, ticks: [3600, 2700, 1800, 900, 0], unit: "1M" },
+  "24H": { span: 86_400_000, bucket: 900_000, ticks: [86400, 64800, 43200, 21600, 0], unit: "15M" },
+  "ALL": { span: 3_600_000, bucket: 60_000, ticks: [3600, 2400, 1200, 0], unit: "1M" },
 };
-let range = "30S";
+const SIZES = [[1000, "1S"], [10_000, "10S"], [60_000, "1M"], [300_000, "5M"], [900_000, "15M"], [3_600_000, "1H"], [14_400_000, "4H"], [86_400_000, "1D"]];
+function fitAll() {
+  const R = RANGES.ALL, first = prices.length ? prices[0].t : Date.now() - 3_600_000;
+  const span = Math.max(60_000, (Date.now() - first) * 1.03);
+  const size = SIZES.find((z) => z[0] >= span / 90) || SIZES[SIZES.length - 1];
+  R.bucket = size[0]; R.unit = size[1]; R.span = Math.ceil(span / size[0]) * size[0];
+  const top = Math.round(R.span / 1000); R.ticks = [top, Math.round(top * 2 / 3), Math.round(top / 3), 0];
+  if (range === "ALL") { SPAN = R.span; BUCKET = R.bucket; }
+}
+let range = "ALL";
 try { const r = localStorage.getItem("hs-range"); if (r && RANGES[r]) range = r; } catch (e) {}
 let SPAN = RANGES[range].span, BUCKET = RANGES[range].bucket;
-const tickLabel = (s) => s === 0 ? "NOW" : s < 60 ? "-" + s + "S" : "-" + Math.round(s / 60) + "M";
+const tickLabel = (s) => s === 0 ? "NOW" : s < 60 ? "-" + s + "S" : s < 7200 ? "-" + Math.round(s / 60) + "M" : s < 172800 ? "-" + Math.round(s / 3600) + "H" : "-" + Math.round(s / 86400) + "D";
 let HW = 0, HH = 0, vLo = 0, vHi = 0, vMax = 0;
 function drawHero() {
   if (!HW) return;
@@ -580,9 +677,7 @@ function drawHero() {
   g.strokeStyle = C.dim; g.setLineDash([2, 5]); g.beginPath(); g.moveTo(x0, y1 + 0.5); g.lineTo(x1, y1 + 0.5); g.stroke(); g.setLineDash([]);
   // one-second buckets: OHLC from trade prices, volume from market flow
   const b0 = Math.floor(from / BUCKET) * BUCKET;
-  let prev = null, pi = 0, ti = 0;
-  for (let i = prices.length - 1; i >= 0; i--) if (prices[i].t < b0) { prev = prices[i].p; pi = i + 1; break; }
-  while (ti < ticks.length && ticks[ti].t < b0) ti++;
+  let pi = lb(prices, b0), ti = lb(ticks, b0), prev = pi > 0 ? prices[pi - 1].p : null;
   const bars = [];
   for (let s = b0; s <= now; s += BUCKET) {
     let o = prev, c = prev, h = prev, l = prev, n = 0, buy = 0, sell = 0;
@@ -594,6 +689,7 @@ function drawHero() {
   let lo = Infinity, hi = -Infinity, vm = 0;
   for (const b of bars) { lo = Math.min(lo, b.l); hi = Math.max(hi, b.h); vm = Math.max(vm, b.buy + b.sell); }
   const pad = (hi - lo) * 0.2 || hi * 0.004;
+  lo = Math.max(lo - pad, lo * 0.5) + pad; // never let the padding take the scale below zero
   if (!vHi) { vLo = lo - pad; vHi = hi + pad; vMax = vm; } else { vLo += (lo - pad - vLo) * 0.08; vHi += (hi + pad - vHi) * 0.08; vMax += (vm - vMax) * 0.08; }
   const Y = (v) => cBot - ((v - vLo) / (vHi - vLo)) * (cBot - cTop);
   // market cap scale on the grid rows, volume scale at the top of its band
@@ -627,6 +723,8 @@ function drawHero() {
     const label = mi >= shown.length - named;
     const x = X(m.t), y = Math.max(cTop, Math.min(cBot, Y(mcapOf(m.p)))), col = m.side === "buy" ? C.ice : C.sun, age = (now - m.t) / 1000;
     const off = 34 + (label ? slot++ % 3 : 0) * 18, ly = m.side === "buy" ? y - off : y + off;
+    // On long ranges older unit trades are small ticks, so the full markers stay readable.
+    if (!label && shown.length > 40) { g.fillStyle = col; g.globalAlpha = 0.8; g.fillRect(Math.round(x) - 1, Math.round(y) - 1, 3, 3); g.globalAlpha = 1; return; }
     if (label) {
       g.strokeStyle = col; g.globalAlpha = 0.6; g.beginPath(); g.moveTo(Math.round(x) + 0.5, y); g.lineTo(Math.round(x) + 0.5, ly); g.stroke();
       g.globalAlpha = 1;
@@ -778,10 +876,6 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 function setRunning(on) { on = on && !reduce && !document.hidden; if (on && !running) { running = true; last = performance.now(); requestAnimationFrame(frame); } else if (!on) running = false; }
-function trim() {
-  const cut = Date.now() - 61 * 60_000;
-  for (const a of [prices, marks, ticks]) { let i = 0; while (i < a.length - 1 && a[i].t < cut) i++; if (i) a.splice(0, i); }
-}
 
 function onEvent(l) {
   const ts = l.ts;
@@ -829,10 +923,36 @@ function onEvent(l) {
       add("market", '<span class="early">⏳ incoming</span> <span class="k ' + l.kind + '">' + l.kind + '</span> <span class="dim">' + short(l.owner) + " · " + esc(l.venue) + " · not executed yet</span>", ts, "early");
       return;
     }
-    case "synced": { syncing = false; renderAgents(); stats(); drawHero(); return; }
+    case "synced": { syncing = false; since = Number(l.since) || Date.now(); fitAll(); renderAgents(); stats(); drawHero(); loadTrades(); return; }
+    case "backfill": { clearTimeout(tradesTimer); tradesTimer = setTimeout(loadTrades, 1500); return; }
     case "solusd": { solUsd = Number(l.usd) > 0 ? Number(l.usd) : null; stats(); return; }
     case "task_error": { const a = agents.get(l.agent); if (a) { a.last = "error: " + String(l.error).slice(0, 80); renderAgents(); } return; }
   }
+}
+
+// Trades older than the replayed hour, in one compact request: the chart's long ranges and the trade count.
+let since = 0, oldFills = 0, tradesTimer = 0, tradesBusy = false;
+async function loadTrades() {
+  if (tradesBusy || !since) return;
+  tradesBusy = true;
+  try {
+    const res = await fetch("trades?before=" + since, { cache: "no-store" });
+    if (!res.ok) return;
+    const d = await res.json(), cut = Number(d.before) || since;
+    const keep = (a) => a.slice(lb(a, cut));
+    const P = [], T = [], M = [];
+    for (const f of d.flows) { P.push({ t: f[0], p: f[3] }); T.push({ t: f[0], p: f[3], side: f[1] ? "buy" : "sell", sol: f[2] }); }
+    for (const f of d.fills) { P.push({ t: f[0], p: f[4] }); M.push({ t: f[0], p: f[4], side: f[2] ? "buy" : "sell", agent: f[1], sol: f[3] }); }
+    P.sort((a, b) => a.t - b.t);
+    const np = P.concat(keep(prices)), nt = T.concat(keep(ticks)), nm = M.concat(keep(marks));
+    prices.length = 0; ticks.length = 0; marks.length = 0;
+    for (const x of np) prices.push(x); for (const x of nt) ticks.push(x); for (const x of nm) marks.push(x);
+    if (prices.length) lastPrice = prices[prices.length - 1].p;
+    agentTrades += d.fills.length - oldFills; oldFills = d.fills.length;
+    fitAll(); stats(); drawHero();
+  } catch (e) {
+    /* the chart keeps what it has */
+  } finally { tradesBusy = false; }
 }
 
 function connect() {
@@ -842,7 +962,7 @@ function connect() {
     agents.clear();
     // A reconnect replays the whole history, so start the chart and counters clean.
     for (const a of [prices, marks, ticks, mkt, early]) a.length = 0;
-    agentTrades = 0; lastPrice = 0; syncing = true; vHi = 0;
+    agentTrades = 0; lastPrice = 0; syncing = true; vHi = 0; oldFills = 0; since = 0;
     for (const a of info.agents) agents.set(a.id, { ...a, cash: a.bankrollSol, start: a.bankrollSol, tokens: 0, last: "" });
     orbitSetup();
     const t = info.tokens[0];
@@ -858,10 +978,10 @@ function connect() {
   es.onerror = () => { $("conn").classList.remove("on"); $("connTxt").textContent = "reconnecting"; };
 }
 function setRange(r) {
-  range = r; SPAN = RANGES[r].span; BUCKET = RANGES[r].bucket; vHi = 0;
+  range = r; fitAll(); SPAN = RANGES[r].span; BUCKET = RANGES[r].bucket; vHi = 0;
   document.querySelectorAll(".rng button").forEach((b) => { b.classList.toggle("on", b.dataset.r === r); b.setAttribute("aria-pressed", String(b.dataset.r === r)); });
   $("rngLbl").textContent = r;
-  $("hero").setAttribute("aria-label", "Market cap and volume over the last " + (r === "30S" ? "30 seconds" : r === "5M" ? "5 minutes" : "hour") + ", with every unit trade marked.");
+  $("hero").setAttribute("aria-label", "Market cap and volume " + (r === "30S" ? "over the last 30 seconds" : r === "5M" ? "over the last 5 minutes" : r === "1H" ? "over the last hour" : r === "24H" ? "over the last 24 hours" : "since launch") + ", with every unit trade marked.");
   try { localStorage.setItem("hs-range", r); } catch (e) {}
   stats(); drawHero();
 }
@@ -871,7 +991,7 @@ document.querySelectorAll(".tabs .btn").forEach((b) => b.onclick = () => {
   filter = b.dataset.f;
   for (const ev of $("feed").children) ev.style.display = filter === "all" || ev.dataset.kind === filter ? "" : "none";
 });
-setInterval(() => { stats(); trim(); if (!running) drawHero(); }, 1000);
+setInterval(() => { fitAll(); stats(); if (!running) drawHero(); }, 1000);
 if ("ResizeObserver" in window) { const ro = new ResizeObserver(resize); ro.observe(consoleEl); ro.observe(mapEl); } else addEventListener("resize", resize);
 layout(); resize(); setRange(range);
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { drawHero(); drawMap(); });

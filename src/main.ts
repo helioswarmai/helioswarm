@@ -232,20 +232,28 @@ async function main() {
           dash?.push({ event: "wallet", agent: s.id, address: agentWallets.get(s.id)!.address, balanceSol: b, tradableSol: b });
         }
       }
+      let stopPoll = () => {};
       if (dash && rpcUrl) {
-        // Recent trades from the chain, so the chart and feed have history from the first visit.
-        const { backfillFlows } = await import("./backfill");
-        void backfillFlows(rpcUrl, mints)
-          .then((flows) => {
-            const lines: Record<string, unknown>[] = [];
-            for (const l of flows) {
-              const agent = byAddress.get(String(l.owner));
-              if (agent) lines.push({ ts: l.ts, event: "fill", agent, side: l.kind, mint: l.mint, sol: l.sol, tokens: l.tokens, priceSol: l.priceSol, sig: l.sig, reason: "on-chain" });
-              lines.push(l);
-            }
-            view.status(`dashboard: ${dash.seed(lines)} past trades loaded from chain`);
-          })
-          .catch((e) => view.status(`dashboard: trade backfill failed: ${(e as Error).message}`));
+        // The token's whole trade history from the chain, so the chart and feed show every trade.
+        // Unit wallets' trades become fills, as in the live stream below.
+        const asLines = (flows: Record<string, unknown>[]) => {
+          const lines: Record<string, unknown>[] = [];
+          for (const l of flows) {
+            const agent = byAddress.get(String(l.owner));
+            if (agent) lines.push({ ts: l.ts, event: "fill", agent, side: l.kind, mint: l.mint, sol: l.sol, tokens: l.tokens, priceSol: l.priceSol, sig: l.sig, reason: "on-chain" });
+            lines.push(l);
+          }
+          return lines;
+        };
+        const { backfillAll, pollFlows } = await import("./backfill");
+        const known = dash.knownSigs(); // from the history file; trades arriving live meanwhile must not stop the backfill
+        void backfillAll(rpcUrl, mints, { has: (s) => known.has(s), oldest: () => dash.oldestSig(), onBatch: (flows) => dash.seed(asLines(flows)) })
+          .then((n) => { dash.flush(); view.status(`dashboard: ${n} past trades loaded from chain`); })
+          .catch((e) => view.status(`dashboard: trade backfill failed: ${(e as Error).message}`))
+          .finally(() => {
+            // New trades from the RPC too, in case the gRPC stream drops.
+            stopPoll = pollFlows(rpcUrl, mints, { has: (s) => dash.hasSig(s), onLines: (flows) => { for (const l of asLines(flows)) dash.push(l); } });
+          });
       }
       const stopStream = await startStream(cfg, mints, rpcUrl, (s) => (view.signal(s), dash?.push({ event: "signal", ...s })), {
         onFlow: (l) => {
@@ -259,7 +267,7 @@ async function main() {
         onStatus: (m) => view.status(m),
         onEngine: (e) => (engine = e),
       });
-      stop = () => (stopStream(), view.stop(), dash?.close());
+      stop = () => (stopPoll(), stopStream(), view.stop(), dash?.close());
     }
     await new Promise<void>((done) => {
       process.once("SIGINT", done);
