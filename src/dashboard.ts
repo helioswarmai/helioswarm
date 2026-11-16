@@ -13,7 +13,8 @@ export interface DashboardAgent {
 export interface DashboardInfo {
   title: string;
   mode: "live" | "paper" | "watch";
-  tokens: { mint: string; symbol: string }[];
+  /** supply: whole tokens, for market cap (the page assumes 1B, the pump.fun mint, when absent). */
+  tokens: { mint: string; symbol: string; supply?: number }[];
   agents: DashboardAgent[];
 }
 
@@ -21,6 +22,7 @@ export class Dashboard {
   private clients = new Set<ServerResponse>();
   private history: string[] = [];
   private server;
+  private solUsd: number | null = null;
 
   constructor(private info: DashboardInfo, port: number) {
     this.server = createServer((req, res) => {
@@ -28,6 +30,7 @@ export class Dashboard {
       if (path.endsWith("/events")) {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
         res.write(`event: info\ndata: ${JSON.stringify(this.info)}\n\n`);
+        if (this.solUsd) res.write(`data: ${JSON.stringify({ event: "solusd", usd: this.solUsd })}\n\n`);
         for (const h of this.history) res.write(h);
         this.clients.add(res);
         req.on("close", () => this.clients.delete(res));
@@ -45,6 +48,24 @@ export class Dashboard {
       for (const c of this.clients) c.write(": ping\n\n");
     }, 15_000);
     ping.unref();
+    // SOL/USD for market cap in dollars, from Jupiter's public price API once a minute.
+    const solPrice = async () => {
+      try {
+        const sol = "So11111111111111111111111111111111111111112";
+        const res = await fetch(`https://lite-api.jup.ag/price/v3?ids=${sol}`, { signal: AbortSignal.timeout(8000) });
+        const usd = res.ok ? ((await res.json()) as Record<string, { usdPrice?: number } | null>)[sol]?.usdPrice : undefined;
+        if (usd && usd > 0) {
+          this.solUsd = usd;
+          const msg = `data: ${JSON.stringify({ event: "solusd", usd })}\n\n`;
+          for (const c of this.clients) c.write(msg);
+        }
+      } catch {
+        /* keep the last value; the page shows SOL until one arrives */
+      }
+    };
+    void solPrice();
+    const usdTimer = setInterval(solPrice, 60_000);
+    usdTimer.unref();
   }
 
   push(line: Record<string, unknown>) {
@@ -236,7 +257,7 @@ STATUS ...... <b id="mStatus">NOMINAL</b></pre>
     <div class="clock">
       <strong id="clock">T+0000</strong>
       <span class="legend" aria-hidden="true">[ ] HOLD   <span class="ice">[+] BUY</span>   <span class="sun">[-] SELL</span></span>
-      <span class="label pair"><b id="sym">-</b> / SOL &nbsp;<span id="chg"></span> <span class="dim">:: 30S</span></span>
+      <span class="label pair"><b id="sym">-</b> MCAP &nbsp;<span id="chg"></span> <span class="dim">:: 30S</span></span>
       <a class="btn" id="mintLink" target="_blank" rel="noopener">Token</a>
     </div>
   </div>
@@ -246,9 +267,9 @@ STATUS ...... <b id="mStatus">NOMINAL</b></pre>
   <section class="readouts" aria-label="Swarm readouts">
     <div class="ro"><div class="label">Swarm P&amp;L</div><div class="v" id="sPnl">-</div></div>
     <div class="ro"><div class="label">Unit trades</div><div class="v" id="sTrades">00</div></div>
-    <div class="ro"><div class="label">Market +/- 5m</div><div class="v" id="sMkt">0 / 0</div></div>
+    <div class="ro"><div class="label">Volume 5m <span class="dim">SOL</span></div><div class="v" id="sVol">0</div></div>
     <div class="ro"><div class="label">Seen pre-exec</div><div class="v" id="sEarly">-</div></div>
-    <div class="ro"><div class="label">Price <span class="dim">SOL</span></div><div class="v" id="price">-</div></div>
+    <div class="ro"><div class="label">Market cap</div><div class="v" id="mcap">-</div></div>
   </section>
 
   <div class="panes">
@@ -301,6 +322,11 @@ const prices = [], marks = [], ticks = [], mkt = [], early = [];
 let agentTrades = 0, lastPrice = 0, firstPrice = 0;
 let pointer = null, hoverId = null, pulses = [], status = null, cardKey = "";
 const t0 = Date.now();
+let solUsd = null;
+// Market cap: price in SOL x supply (pump.fun tokens mint 1B), in USD once the server sends SOL/USD.
+const supplyOf = () => Number(info?.tokens?.[0]?.supply) || 1e9;
+const mcapOf = (p) => p * supplyOf() * (solUsd || 1);
+const money = (v) => { const a = Math.abs(v), s = a >= 1e9 ? (v / 1e9).toFixed(2) + "B" : a >= 1e6 ? (v / 1e6).toFixed(2) + "M" : a >= 1e3 ? (v / 1e3).toFixed(1) + "K" : v.toFixed(solUsd ? 0 : 2); return solUsd ? "$" + s : s + " SOL"; };
 const sym = (m) => (info?.tokens.find((t) => t.mint === m)?.symbol) || short(m);
 
 function bar(frac, hot) {
@@ -348,12 +374,13 @@ function add(cls, html, ts, kind) {
 function stats() {
   const cut = Date.now() - 5 * 60_000;
   while (mkt.length && mkt[0].t < cut) mkt.shift();
-  $("sMkt").innerHTML = '<span class="ice">' + mkt.filter((m) => m.s === "buy").length + '</span> <span class="dim">/</span> <span class="sun">' + mkt.filter((m) => m.s === "sell").length + "</span>";
+  let vb = 0, vs = 0; for (const m of mkt) { if (m.s === "buy") vb += m.sol; else vs += m.sol; }
+  $("sVol").innerHTML = '<span class="ice">' + vb.toFixed(1) + '</span> <span class="dim">/</span> <span class="sun">' + vs.toFixed(1) + "</span>";
   const e = early.slice(-200).sort((a, b) => a - b);
   $("sEarly").innerHTML = e.length ? e[Math.floor(e.length / 2)] + '<span class="dim">ms</span>' : "—";
   $("sTrades").textContent = String(agentTrades).padStart(2, "0");
   if (lastPrice) {
-    $("price").textContent = lastPrice.toPrecision(4);
+    $("mcap").textContent = money(mcapOf(lastPrice));
     if (firstPrice) { const c = (lastPrice / firstPrice - 1) * 100; $("chg").innerHTML = '<span class="' + (c >= 0 ? "ice" : "sun") + '">' + (c >= 0 ? "+" : "") + c.toFixed(2) + "%</span>"; }
   }
   const s = Math.floor((Date.now() - t0) / 1000);
@@ -408,10 +435,10 @@ function layout() {
   lastW = vw;
 }
 
-// ---------- hero: the last 30 seconds ----------
+// ---------- hero: market cap candles and volume, last 30 seconds ----------
 const hv = $("hero"), hg = hv.getContext("2d");
-const SPAN = 30_000;
-let HW = 0, HH = 0, vLo = 0, vHi = 0;
+const SPAN = 30_000, BUCKET = 1000;
+let HW = 0, HH = 0, vLo = 0, vHi = 0, vMax = 0;
 function drawHero() {
   if (!HW) return;
   const g = hg;
@@ -419,74 +446,74 @@ function drawHero() {
   crosses(g, HW, HH, padL, 96);
   starfield(g, HW, HH);
   const x0 = padL, x1 = HW - padR - G, y0 = 96 + 2 * G, y1 = 96 + rows * G;
+  const vh = Math.round((y1 - y0) * 0.26), cTop = y0, cBot = y1 - vh - 16;
   const now = Date.now(), from = now - SPAN;
   const X = (t) => x0 + ((t - from) / SPAN) * (x1 - x0);
+  const bw = (x1 - x0) * BUCKET / SPAN, w = Math.max(3, Math.round(bw * 0.56)), cell = HW < 700 ? 2 : 3;
   g.font = "10px " + MONO; g.fillStyle = C.dim; g.globalAlpha = 1;
-  // time axis under the plot
   g.textBaseline = "top";
   for (let s = 30; s >= 0; s -= 10) { g.textAlign = s === 30 ? "left" : s === 0 ? "right" : "center"; g.fillText(s ? "-" + s + "S" : "NOW", x0 + (1 - s / 30) * (x1 - x0), y1 + 12); }
   g.strokeStyle = C.dim; g.setLineDash([2, 5]); g.beginPath(); g.moveTo(x0, y1 + 0.5); g.lineTo(x1, y1 + 0.5); g.stroke(); g.setLineDash([]);
-  let pts = prices.filter((p) => p.t >= from);
-  let before = null; for (let i = prices.length - 1; i >= 0; i--) if (prices[i].t < from) { before = prices[i]; break; }
-  if (before) pts.unshift({ t: from, p: before.p });
-  if (!pts.length) { g.textAlign = "left"; g.textBaseline = "middle"; g.fillText("> AWAITING TRADES", x0, (y0 + y1) / 2); return; }
-  pts.push({ t: now, p: pts[pts.length - 1].p });
-  let lo = Infinity, hi = -Infinity;
-  for (const p of pts) { lo = Math.min(lo, p.p); hi = Math.max(hi, p.p); }
-  const pad = (hi - lo) * 0.25 || hi * 0.004;
-  const tLo = lo - pad, tHi = hi + pad;
-  if (!vHi) { vLo = tLo; vHi = tHi; } else { vLo += (tLo - vLo) * 0.08; vHi += (tHi - vHi) * 0.08; }
-  const Y = (p) => y1 - ((p - vLo) / (vHi - vLo)) * (y1 - y0);
-  // price scale on the grid rows
+  // one-second buckets: OHLC from trade prices, volume from market flow
+  const b0 = Math.floor(from / BUCKET) * BUCKET;
+  let prev = null, pi = 0, ti = 0;
+  for (let i = prices.length - 1; i >= 0; i--) if (prices[i].t < b0) { prev = prices[i].p; pi = i + 1; break; }
+  while (ti < ticks.length && ticks[ti].t < b0) ti++;
+  const bars = [];
+  for (let s = b0; s <= now; s += BUCKET) {
+    let o = prev, c = prev, h = prev, l = prev, n = 0, buy = 0, sell = 0;
+    while (pi < prices.length && prices[pi].t < s + BUCKET) { const p = prices[pi++].p; if (!n) { o = prev ?? p; h = Math.max(o, p); l = Math.min(o, p); } h = Math.max(h, p); l = Math.min(l, p); c = p; n++; }
+    while (ti < ticks.length && ticks[ti].t < s + BUCKET) { const k = ticks[ti++]; if (k.side === "buy") buy += k.sol; else sell += k.sol; }
+    if (c != null) { bars.push({ s, o: mcapOf(o), h: mcapOf(h), l: mcapOf(l), c: mcapOf(c), n, buy, sell }); prev = c; }
+  }
+  if (!bars.length) { g.textAlign = "left"; g.textBaseline = "middle"; g.fillText("> AWAITING TRADES", x0, (y0 + y1) / 2); return; }
+  let lo = Infinity, hi = -Infinity, vm = 0;
+  for (const b of bars) { lo = Math.min(lo, b.l); hi = Math.max(hi, b.h); vm = Math.max(vm, b.buy + b.sell); }
+  const pad = (hi - lo) * 0.2 || hi * 0.004;
+  if (!vHi) { vLo = lo - pad; vHi = hi + pad; vMax = vm; } else { vLo += (lo - pad - vLo) * 0.08; vHi += (hi + pad - vHi) * 0.08; vMax += (vm - vMax) * 0.08; }
+  const Y = (v) => cBot - ((v - vLo) / (vHi - vLo)) * (cBot - cTop);
+  // market cap scale on the grid rows, volume scale at the top of its band
   g.textAlign = "right"; g.textBaseline = "middle"; g.fillStyle = C.dim;
-  for (let y = y0; y <= y1 + 0.5; y += G) g.fillText((vLo + ((y1 - y) / (y1 - y0)) * (vHi - vLo)).toPrecision(4), HW - padR - 10, y);
-  // the line as a step path (price holds until the next trade)
-  const path = [];
-  for (let i = 0; i < pts.length; i++) {
-    const x = Math.max(x0, X(pts[i].t)), y = Y(pts[i].p);
-    if (i) path.push([x, path[path.length - 1][1]]);
-    path.push([x, y]);
+  for (let y = y0; y <= cBot + 0.5; y += G) g.fillText(money(vLo + ((cBot - y) / (cBot - cTop)) * (vHi - vLo)), HW - padR - 10, y);
+  g.fillText("VOL " + (vMax ? vMax.toFixed(2) : "0") + " SOL", HW - padR - 10, y1 - vh);
+  g.textAlign = "left"; g.fillText("VOL / 1S", x0, y1 - vh - 8);
+  // volume: dithered bars, buys under sells
+  const vbar = (x, yTop, yBot, col) => {
+    g.fillStyle = col;
+    for (let cy = Math.floor(yTop / cell) * cell; cy < yBot; cy += cell) for (let cx = Math.floor(x / cell) * cell; cx < x + w; cx += cell) if (cx >= x0 && bayer(cx / cell, cy / cell) < 0.62) g.fillRect(cx, cy, cell - 1, cell - 1);
+  };
+  for (const b of bars) {
+    if (!vMax || !(b.buy + b.sell)) continue;
+    const xl = Math.round(X(b.s + BUCKET / 2) - w / 2), hb = (b.buy / vMax) * vh, hs = (b.sell / vMax) * vh;
+    vbar(xl, y1 - hb, y1, C.ice); vbar(xl, y1 - hb - hs, y1 - hb, C.sun);
   }
-  // dithered field under the line, fading toward the floor
-  const cell = HW < 700 ? 3 : 4, depth = Math.min(180, (y1 - y0) * 0.8);
-  g.fillStyle = C.dim; let k = 0;
-  for (let cx = Math.floor(x0 / cell) * cell; cx < x1; cx += cell) {
-    while (k < path.length - 1 && path[k + 1][0] <= cx) k++;
-    const ly = path[k][1];
-    for (let cy = (Math.floor(ly / cell) + 1) * cell; cy < y1; cy += cell) {
-      const v = 1 - (cy - ly) / depth; if (v <= 0) break;
-      if (v * v * 0.85 > bayer(cx / cell, cy / cell)) g.fillRect(cx, cy, cell - 1, cell - 1);
-    }
+  // candles: filled bodies, one pixel wicks; a quiet second is a dim tick
+  for (const b of bars) {
+    const xc = Math.round(X(b.s + BUCKET / 2)); if (xc - w / 2 < x0) continue;
+    if (!b.n) { g.fillStyle = C.dim; g.fillRect(xc - Math.floor(w / 2), Math.round(Y(b.c)), w, 1); continue; }
+    const up = b.c >= b.o, col = up ? C.ice : C.sun, top = Math.round(Y(Math.max(b.o, b.c))), bot = Math.round(Y(Math.min(b.o, b.c)));
+    g.fillStyle = col;
+    g.fillRect(xc, Math.round(Y(b.h)), 1, Math.max(1, Math.round(Y(b.l)) - Math.round(Y(b.h))));
+    g.fillRect(xc - Math.floor(w / 2), top, w, Math.max(2, bot - top));
   }
-  g.strokeStyle = C.fg; g.lineWidth = 1.5; g.beginPath();
-  path.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
-  g.stroke(); g.lineWidth = 1;
-  // market trades: small ticks on the line
-  for (const m of ticks) {
-    if (m.t < from) continue;
-    const s = m.sol >= 1 ? 3 : 2;
-    g.globalAlpha = 0.7; g.fillStyle = m.side === "buy" ? C.ice : C.sun;
-    g.fillRect(Math.round(X(m.t) - s / 2), Math.round(Y(m.p) - s / 2) + (m.side === "buy" ? -6 : 4), s, s);
-  }
-  g.globalAlpha = 1;
   // unit trades: a marker, brackets, and a call sign on a leader
   let slot = 0;
   const shown = marks.filter((m) => m.t >= from), named = HW < 700 ? 3 : 12;
   shown.forEach((m, mi) => {
     const label = mi >= shown.length - named;
-    const x = X(m.t), y = Y(m.p), col = m.side === "buy" ? C.ice : C.sun, age = (now - m.t) / 1000;
+    const x = X(m.t), y = Math.max(cTop, Math.min(cBot, Y(mcapOf(m.p)))), col = m.side === "buy" ? C.ice : C.sun, age = (now - m.t) / 1000;
     const off = 34 + (label ? slot++ % 3 : 0) * 18, ly = m.side === "buy" ? y - off : y + off;
     if (label) {
-    g.strokeStyle = col; g.globalAlpha = 0.6; g.beginPath(); g.moveTo(Math.round(x) + 0.5, y); g.lineTo(Math.round(x) + 0.5, ly); g.stroke();
-    g.globalAlpha = 1;
-    const txt = String(m.agent || "").toUpperCase() + (m.side === "buy" ? " [+] " : " [-] ") + fmt(m.sol);
-    const tw = g.measureText(txt).width;
-    const lx = x + tw + 16 > x1 ? Math.round(x) - tw - 12 : Math.round(x) + 4;
-    g.fillStyle = C.bg; g.fillRect(lx, Math.round(ly) - 7, tw + 8, 14);
-    g.fillStyle = col; g.textAlign = "left"; g.textBaseline = "middle"; g.fillText(txt, lx + 4, Math.round(ly) + 0.5);
+      g.strokeStyle = col; g.globalAlpha = 0.6; g.beginPath(); g.moveTo(Math.round(x) + 0.5, y); g.lineTo(Math.round(x) + 0.5, ly); g.stroke();
+      g.globalAlpha = 1;
+      const txt = String(m.agent || "").toUpperCase() + (m.side === "buy" ? " [+] " : " [-] ") + fmt(m.sol);
+      const tw = g.measureText(txt).width;
+      const lx = x + tw + 16 > x1 ? Math.round(x) - tw - 12 : Math.round(x) + 4;
+      g.fillStyle = C.bg; g.fillRect(lx, Math.round(ly) - 7, tw + 8, 14);
+      g.fillStyle = col; g.textAlign = "left"; g.textBaseline = "middle"; g.fillText(txt, lx + 4, Math.round(ly) + 0.5);
     }
     g.fillStyle = C.bg; g.fillRect(Math.round(x) - 5, Math.round(y) - 5, 10, 10);
-    g.fillStyle = col; g.fillRect(Math.round(x) - 3, Math.round(y) - 3, 7, 7);
+    g.strokeStyle = col; g.strokeRect(Math.round(x) - 3 + 0.5, Math.round(y) - 3 + 0.5, 6, 6);
     brackets(g, x, y, 9, col);
     if (age < 1.6) for (let i = 0; i < 2; i++) {
       const rr = 12 + ((age * 30 + i * 16) % 32);
@@ -494,11 +521,11 @@ function drawHero() {
     }
     g.globalAlpha = 1;
   });
-  // the live head: a small dithered sun, with the price carried to the scale
-  const hy = Math.round(Y(pts[pts.length - 1].p));
-  g.strokeStyle = C.sun; g.globalAlpha = 0.5; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(x1, hy + 0.5); g.lineTo(HW - padR - 76, hy + 0.5); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
-  ditherSun(g, x1, hy, 4, 22, 3, false, mapT); ditherSun(g, x1, hy, 4, 22, 3, true, mapT);
-  const lbl = pts[pts.length - 1].p.toPrecision(4);
+  // the live head: a small dithered sun on the last close, its market cap carried to the scale
+  const last = bars[bars.length - 1].c, hy = Math.round(Y(last));
+  g.strokeStyle = C.sun; g.globalAlpha = 0.5; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(x1 + 8, hy + 0.5); g.lineTo(HW - padR - 76, hy + 0.5); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+  ditherSun(g, x1 + 8, hy, 4, 20, 3, false, mapT); ditherSun(g, x1 + 8, hy, 4, 20, 3, true, mapT);
+  const lbl = money(last);
   g.font = "10px " + MONO; const lw = g.measureText(lbl).width;
   g.fillStyle = C.bg; g.fillRect(HW - padR - lw - 8, hy - 8, lw + 8, 16);
   g.strokeStyle = C.sun; g.strokeRect(HW - padR - lw - 8 + 0.5, hy - 8 + 0.5, lw + 7, 15);
@@ -661,7 +688,7 @@ function onEvent(l) {
       if (l.kind !== "buy" && l.kind !== "sell") return;
       const buy = l.kind === "buy";
       if (l.priceSol) { lastPrice = Number(l.priceSol); if (!firstPrice) firstPrice = lastPrice; prices.push({ t: Date.now(), p: lastPrice }); ticks.push({ t: Date.now(), p: lastPrice, side: l.kind, sol: Number(l.sol) }); }
-      mkt.push({ t: Date.now(), s: l.kind });
+      mkt.push({ t: Date.now(), s: l.kind, sol: Number(l.sol) || 0 });
       if (l.seenEarlyMs != null && l.seenEarlyMs >= 0) early.push(l.seenEarlyMs);
       const e = l.seenEarlyMs != null && l.seenEarlyMs >= 0 ? ' <span class="early">⚡' + l.seenEarlyMs + "ms</span>" : "";
       add("market", '<span class="k ' + (buy ? "buy" : "sell") + '">' + (buy ? "buy" : "sell") + "</span> " + fmt(l.sol) + " SOL <span class='dim'>" + big(Number(l.tokens)) + " · " + short(l.owner) + "</span>" + e, ts, "market");
@@ -672,6 +699,7 @@ function onEvent(l) {
       add("market", '<span class="early">⏳ incoming</span> <span class="k ' + l.kind + '">' + l.kind + '</span> <span class="dim">' + short(l.owner) + " · " + esc(l.venue) + " · not executed yet</span>", ts, "early");
       return;
     }
+    case "solusd": { solUsd = Number(l.usd) > 0 ? Number(l.usd) : null; stats(); return; }
     case "task_error": { const a = agents.get(l.agent); if (a) { a.last = "error: " + String(l.error).slice(0, 80); renderAgents(); } return; }
   }
 }
