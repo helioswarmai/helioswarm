@@ -76,7 +76,7 @@ const PAGE = /* html */ `<!doctype html>
 :root {
   color-scheme: dark;
   --bg: #000000; --fg: #EEF0F2; --muted: #9B9B9B; --dim: #5B5F66; --line: #2A2C30; --line-soft: rgba(42,44,48,0.6);
-  --sun: #FF8A3D; --sun-core: #FFFFFF; --ice: #BFE9EC; --grid: rgba(255,255,255,0.05);
+  --sun: #FF8A3D; --sun-core: #FFFFFF; --ice: #BFE9EC; 
   --g: 96px; --padl: 16px; --padr: 16px; --top: 96px;
   --sans: "Geist", "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -84,9 +84,6 @@ const PAGE = /* html */ `<!doctype html>
 }
 *, *::before, *::after { box-sizing: border-box; }
 body { margin: 0; color: var(--fg); background: var(--bg); font-family: var(--sans); font-size: 16px; line-height: 24px; -webkit-font-smoothing: antialiased; overflow-x: hidden; position: relative; isolation: isolate; min-height: 100vh; }
-body::before { content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
-  background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
-  background-size: var(--g) var(--g); background-position: var(--padl) var(--top); }
 h1, h2, p, dl, dd { margin: 0; }
 a { color: inherit; }
 :focus-visible { outline: 2px solid var(--ice); outline-offset: 3px; }
@@ -337,10 +334,6 @@ function drawChart() {
   c.width = w * dpr; c.height = h * dpr;
   const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
   const now = Date.now(), from = now - 10 * 60_000, axis = 72, pw = w - axis;
-  // a registration cross every minute and every quarter of the range
-  g.strokeStyle = "rgba(155,155,155,0.4)"; g.lineWidth = 1; g.beginPath();
-  for (let i = 0; i <= 10; i++) { const x = Math.round(4 + (i / 10) * (pw - 8)) + 0.5; for (let r = 0; r <= 4; r++) { const y = Math.round(12 + (r / 4) * (h - 24)) + 0.5; g.moveTo(x - 3, y); g.lineTo(x + 4, y); g.moveTo(x, y - 3); g.lineTo(x, y + 4); } }
-  g.stroke();
   g.font = "10px 'Geist Mono', monospace"; g.textBaseline = "middle";
   const pts = prices.filter((p) => p.t >= from);
   if (pts.length < 2) { g.fillStyle = "#5B5F66"; g.fillText("> AWAITING TRADES", 4, h / 2); return; }
@@ -457,6 +450,7 @@ function drawSun(coreOnly) {
 function drawMap() {
   if (!W) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+  // registration marks where the page grid crosses (the only grid on the page)
   ctx.lineWidth = 1; ctx.strokeStyle = C.muted; ctx.globalAlpha = 0.4; ctx.beginPath();
   for (let x = padL; x <= W; x += G) for (let y = 96; y <= H; y += G) { ctx.moveTo(x - 3, y + 0.5); ctx.lineTo(x + 4, y + 0.5); ctx.moveTo(x + 0.5, y - 3); ctx.lineTo(x + 0.5, y + 4); }
   ctx.stroke();
